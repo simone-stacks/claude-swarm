@@ -176,7 +176,10 @@ cmd_start() {
     rm_docker_dir "$BARE_REPO"
     git clone --bare "$REPO_ROOT" "$BARE_REPO"
 
-    git -C "$BARE_REPO" branch agent-work HEAD 2>/dev/null || true
+    # Force-update: a stale local agent-work branch in REPO_ROOT would
+    # otherwise be copied by `clone --bare` and pin agent-work to the wrong
+    # commit. -f resets it to the actual HEAD just cloned.
+    git -C "$BARE_REPO" branch -f agent-work HEAD
     git -C "$BARE_REPO" symbolic-ref HEAD refs/heads/agent-work
 
     # Allow any UID to push.  The container's "agent" user (UID 1000)
@@ -460,7 +463,9 @@ cmd_post_process() {
     if [ ! -d "$BARE_REPO" ]; then
         echo "--- Creating bare repo for post-process ---"
         git clone --bare "$REPO_ROOT" "$BARE_REPO"
-        git -C "$BARE_REPO" branch agent-work HEAD 2>/dev/null || true
+        # Force-update: stale agent-work in REPO_ROOT would otherwise pin
+        # the bare repo's branch to the wrong commit.
+        git -C "$BARE_REPO" branch -f agent-work HEAD
         git -C "$BARE_REPO" symbolic-ref HEAD refs/heads/agent-work
         git -C "$BARE_REPO" config core.sharedRepository world
         chmod -R a+rwX "$BARE_REPO"
