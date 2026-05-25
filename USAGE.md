@@ -243,6 +243,66 @@ otherwise launch fails with `ERROR: signing key not found`.
 The container image ships `openssh-client` for the
 `ssh-keygen -Y sign` that git invokes.
 
+## Publishing signed commits via the GitHub API
+
+`./publish.sh` replays a range of local commits onto a remote
+branch as GitHub-App-signed commits via the
+[`createCommitOnBranch`](https://docs.github.com/en/graphql/reference/mutations#createcommitonbranch)
+GraphQL mutation.  Commits land on the remote signed by
+GitHub's own key and marked Verified.  Plain `git push` cannot
+achieve this regardless of the token used; the only other way
+to get Verified commits is to ship a private signing key onto
+the runner (see [Commit signing](#commit-signing)).  Using the
+API replay lets a runner drop its signing key entirely while
+keeping commits attributable to the GitHub App installation.
+
+Typical use is on a CI runner, after `./harvest.sh` (or any
+other process) has produced a local commit range that should
+land on a public branch as signed commits:
+
+```bash
+GH_TOKEN=$(gh auth token) \
+GITHUB_REPOSITORY=owner/repo \
+    ./publish.sh \
+        --branch workflow/123 \
+        --base "$BASE_SHA" \
+        --head HEAD
+```
+
+`--base` is the parent commit on the remote (the branch will
+be created at this SHA if it does not exist, and must already
+point at this SHA if it does).  `--head` defaults to `HEAD`.
+`--dry` runs the blob-size preflight only and makes no API
+calls.
+
+Required environment:
+
+| Variable | Description |
+|---|---|
+| `GH_TOKEN` | GitHub App installation token, or PAT with `contents:write` on the target repo. |
+| `GITHUB_REPOSITORY` | `owner/repo` of the publication target. |
+
+Requires `gh`, `jq`, and `base64` on `PATH` in addition to the
+usual `git`.
+
+### Limitations
+
+- **Single-parent only.**  Merge commits in the range are
+  skipped (`git log --no-merges`).  The typical agent flow is
+  linear (rebase-only), so this matches the common case; an
+  explicit merge commit's content is silently dropped.
+- **File mode is not preserved.**  All files land as
+  `100644`.  PoC scripts that need the executable bit can be
+  invoked via `bash script.sh`.
+- **Per-blob ceiling.**  `createCommitOnBranch` rejects blobs
+  larger than ~40 MiB; `publish.sh` preflights at 35 MiB and
+  fails fast with the offending blob's path.  Workaround:
+  externalise large blobs (artifact / release asset) and
+  commit a pointer.
+- **One API call per commit.**  Replaying N commits takes N
+  round-trips.  Acceptable for the typical workflow-branch
+  size (1 to a few dozen commits).
+
 ## Dashboard
 
 ```bash
@@ -353,6 +413,7 @@ Unit tests (no Docker or API key):
 ./tests/test_harness.sh        # Stat extraction.
 ./tests/test_harvest.sh        # Harvest git ops.
 ./tests/test_launch.sh         # Launch logic.
+./tests/test_publish.sh        # API-signed commit replay.
 ```
 
 ## Post-processing
