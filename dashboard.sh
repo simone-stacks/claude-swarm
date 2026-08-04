@@ -243,6 +243,7 @@ short_driver() {
         gemini-cli)  printf 'gemini' ;;
         codex-cli)   printf 'codex'  ;;
         kimi-cli)    printf 'kimi'   ;;
+        qwen-cli)    printf 'qwen'   ;;
         *)           printf '%s' "${1:-}" ;;
     esac
 }
