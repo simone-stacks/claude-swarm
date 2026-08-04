@@ -680,6 +680,50 @@ assert_eq "backoff capped at 1800" "1800" "$(simulate_backoff 10)"
         "$(probe_retriable 'model_not_found: kimi-unknown is not available')"
 )
 
+# --- 14d. qwen-cli agent_is_retriable classification ---
+#
+# Same two-class contract as kimi: the harness only enters the
+# backoff loop on a non-empty class label, so a misclassified
+# transient failure would exit the swarm instead of retrying.
+(
+    # Subshell so sourcing the driver doesn't clobber earlier
+    # assertions' shell state.
+    source "$TESTS_DIR/../lib/drivers/qwen-cli.sh"
+
+    probe_retriable() {
+        local log="$TMPDIR/qwen-retriable-$$-${RANDOM}.log"
+        printf '%s\n' "$1" > "$log"
+        agent_is_retriable "$log" 1
+        rm -f "$log"
+    }
+
+    # Rate-limit class.
+    assert_eq "qwen retriable: 429 response" "rate_limited" \
+        "$(probe_retriable 'HTTP 429 Too Many Requests')"
+    assert_eq "qwen retriable: dashscope throttling" "rate_limited" \
+        "$(probe_retriable 'Throttling.RateQuota')"
+    assert_eq "qwen retriable: quota exhaustion" "rate_limited" \
+        "$(probe_retriable 'quota exceeded for the current plan')"
+
+    # Transient class.
+    assert_eq "qwen retriable: 502 bad gateway" "transient" \
+        "$(probe_retriable 'HTTP 502 Bad Gateway')"
+    assert_eq "qwen retriable: 503 service unavailable" "transient" \
+        "$(probe_retriable 'HTTP 503 Service Unavailable')"
+    assert_eq "qwen retriable: connection reset" "transient" \
+        "$(probe_retriable 'connection reset by peer')"
+    assert_eq "qwen retriable: request timeout" "transient" \
+        "$(probe_retriable 'request timed out after 60s')"
+    assert_eq "qwen retriable: overloaded" "transient" \
+        "$(probe_retriable 'The server is overloaded, please retry later')"
+
+    # Genuinely fatal errors must NOT be reclassified as retriable.
+    assert_eq "qwen non-retriable: auth error" "" \
+        "$(probe_retriable 'Unauthorized: invalid API key')"
+    assert_eq "qwen non-retriable: model not found" "" \
+        "$(probe_retriable 'model_not_found: qwen-unknown is not available')"
+)
+
 # ============================================================
 echo ""
 echo "=== 12. SSH signing config ==="

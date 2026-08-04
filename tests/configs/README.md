@@ -15,12 +15,13 @@ export MINIMAX_API_KEY="sk-api-..."
 export GEMINI_API_KEY="AI..."
 export OPENAI_API_KEY="sk-..."
 export KIMI_API_KEY="sk-..."
+export QWEN_API_KEY="sk-sp-..."
 ```
 
 Verify they're set:
 
 ```bash
-for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENROUTER_API_KEY MINIMAX_API_KEY GEMINI_API_KEY OPENAI_API_KEY KIMI_API_KEY; do
+for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENROUTER_API_KEY MINIMAX_API_KEY GEMINI_API_KEY OPENAI_API_KEY KIMI_API_KEY QWEN_API_KEY; do
   printf "%-30s %s\n" "$v" "${!v:+(set)}"
 done
 ```
@@ -47,6 +48,10 @@ done
 | `kimi-oauth.json` | 2x kimi-code/kimi-for-coding (oauth auth) | kimi-cli | `~/.kimi-code` |
 | `kimi-auth-mixed.json` | kimi-for-coding (oauth) + kimi-for-coding (apikey) + kimi-for-coding (auto) | kimi-cli | `~/.kimi-code` + `KIMI_API_KEY` |
 | `kimi-mixed.json` | Opus + 2x kimi-code/kimi-for-coding | mixed | `CLAUDE_CODE_OAUTH_TOKEN` + `KIMI_API_KEY` |
+| `qwen-only.json` | 2x qwen3.8-max | qwen-cli | `QWEN_API_KEY` (or `DASHSCOPE_API_KEY`) |
+| `qwen-oauth.json` | 2x qwen3.8-max (oauth auth) | qwen-cli | `~/.qwen` |
+| `qwen-auth-mixed.json` | qwen3.8-max (oauth) + qwen3.8-max (apikey) + qwen3.8-max (auto) | qwen-cli | `~/.qwen` + `QWEN_API_KEY` |
+| `qwen-mixed.json` | Opus + 2x qwen3.8-max | mixed | `CLAUDE_CODE_OAUTH_TOKEN` + `QWEN_API_KEY` |
 
 ## Usage
 
@@ -69,6 +74,10 @@ done
 ./tests/test.sh --config tests/configs/kimi-oauth.json
 ./tests/test.sh --config tests/configs/kimi-auth-mixed.json
 ./tests/test.sh --config tests/configs/kimi-mixed.json
+./tests/test.sh --config tests/configs/qwen-only.json
+./tests/test.sh --config tests/configs/qwen-oauth.json
+./tests/test.sh --config tests/configs/qwen-auth-mixed.json
+./tests/test.sh --config tests/configs/qwen-mixed.json
 ```
 
 The test runner injects its own prompt and setup script into the config,

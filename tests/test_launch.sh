@@ -1034,6 +1034,27 @@ JSON
 assert_eq "kimi version absent" "" \
     "$(jq -r '.kimi_cli_version // empty' "$TMPDIR/kimi_no_version.json")"
 
+cat > "$TMPDIR/qwen_pinned.json" <<'JSON'
+{
+  "prompt": "unused",
+  "qwen_cli_version": "0.21.5",
+  "agents": [{"count": 1, "driver": "qwen-cli", "model": "qwen3.8-max"}]
+}
+JSON
+
+assert_eq "qwen version present" "0.21.5" \
+    "$(jq -r '.qwen_cli_version // empty' "$TMPDIR/qwen_pinned.json")"
+
+cat > "$TMPDIR/qwen_no_version.json" <<'JSON'
+{
+  "prompt": "unused",
+  "agents": [{"count": 1, "driver": "qwen-cli", "model": "qwen3.8-max"}]
+}
+JSON
+
+assert_eq "qwen version absent" "" \
+    "$(jq -r '.qwen_cli_version // empty' "$TMPDIR/qwen_no_version.json")"
+
 # ============================================================
 echo ""
 echo "=== 30. Top-level tag inheritance ==="
@@ -1682,6 +1703,14 @@ EOF
 assert_eq "kimi-only top-level driver" "kimi-cli" \
     "$(compute_swarm_agents "$TMPDIR/csa_kimi.json")"
 
+cat > "$TMPDIR/csa_qwen.json" <<'EOF'
+{ "prompt": "p.md",
+  "driver": "qwen-cli",
+  "agents": [{ "count": 1, "model": "qwen3.8-max" }] }
+EOF
+assert_eq "qwen-only top-level driver" "qwen-cli" \
+    "$(compute_swarm_agents "$TMPDIR/csa_qwen.json")"
+
 cat > "$TMPDIR/csa_mixed.json" <<'EOF'
 { "prompt": "p.md",
   "agents": [
@@ -1819,6 +1848,9 @@ assert_eq "build_image forwards CODEX_CLI_VERSION build-arg" "1" \
 assert_eq "build_image forwards KIMI_CLI_VERSION build-arg" "1" \
     "$(printf '%s\n' "$_bi_body" \
         | grep -cE -- '--build-arg "KIMI_CLI_VERSION=' || true)"
+assert_eq "build_image forwards QWEN_CLI_VERSION build-arg" "1" \
+    "$(printf '%s\n' "$_bi_body" \
+        | grep -cE -- '--build-arg "QWEN_CLI_VERSION=' || true)"
 
 # ============================================================
 echo ""

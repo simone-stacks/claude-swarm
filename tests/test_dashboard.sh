@@ -64,6 +64,10 @@ assert_eq "kimi no effort"       "kimi-code/kimi-for-coding" \
     "$(format_model kimi-code/kimi-for-coding "")"
 assert_eq "kimi with effort"     "kimi-code/kimi-for-coding (h)" \
     "$(format_model kimi-code/kimi-for-coding high)"
+assert_eq "qwen no effort"       "qwen3.8-max" \
+    "$(format_model qwen3.8-max "")"
+assert_eq "qwen with effort"     "qwen3.8-max (h)" \
+    "$(format_model qwen3.8-max high)"
 assert_eq "no effort"            "claude-opus-4-6"         "$(format_model claude-opus-4-6 "")"
 assert_eq "unknown no effort"    "unknown"                 "$(format_model unknown "")"
 assert_eq "empty default"        "unknown"                 "$(format_model)"
@@ -99,6 +103,7 @@ short_driver() {
         gemini-cli)  printf 'gemini' ;;
         codex-cli)   printf 'codex'  ;;
         kimi-cli)    printf 'kimi'   ;;
+        qwen-cli)    printf 'qwen'   ;;
         *)           printf '%s' "${1:-}" ;;
     esac
 }
@@ -266,6 +271,7 @@ assert_eq "claude-code → claude" "claude" "$(short_driver claude-code)"
 assert_eq "gemini-cli → gemini"  "gemini" "$(short_driver gemini-cli)"
 assert_eq "codex-cli → codex"    "codex"  "$(short_driver codex-cli)"
 assert_eq "kimi-cli → kimi"      "kimi"   "$(short_driver kimi-cli)"
+assert_eq "qwen-cli → qwen"      "qwen"   "$(short_driver qwen-cli)"
 assert_eq "fake passthrough"     "fake"   "$(short_driver fake)"
 assert_eq "unknown passthrough"  "foo"    "$(short_driver foo)"
 assert_eq "empty → empty"       ""        "$(short_driver "")"
@@ -661,6 +667,31 @@ cat > "$TMPDIR/all_kimi.json" <<'EOF'
 }
 EOF
 assert_eq "all kimi → 1 driver" "1" "$(detect_multi_drivers "$TMPDIR/all_kimi.json")"
+
+cat > "$TMPDIR/mixed_qwen.json" <<'EOF'
+{
+  "prompt": "p.md",
+  "driver": "qwen-cli",
+  "agents": [
+    { "count": 1, "model": "qwen3.8-max" },
+    { "count": 1, "model": "claude-opus-4-6", "driver": "claude-code" }
+  ]
+}
+EOF
+assert_eq "qwen + claude override → 2 drivers" "2" \
+    "$(detect_multi_drivers "$TMPDIR/mixed_qwen.json")"
+
+cat > "$TMPDIR/all_qwen.json" <<'EOF'
+{
+  "prompt": "p.md",
+  "driver": "qwen-cli",
+  "agents": [
+    { "count": 1, "model": "qwen3.8-max" },
+    { "count": 1, "model": "qwen3.8-max" }
+  ]
+}
+EOF
+assert_eq "all qwen → 1 driver" "1" "$(detect_multi_drivers "$TMPDIR/all_qwen.json")"
 
 # ============================================================
 echo ""

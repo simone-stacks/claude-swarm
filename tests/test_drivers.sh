@@ -61,6 +61,8 @@ assert_eq "codex driver exists" "true" \
     "$([ -f "$DRIVERS_DIR/codex-cli.sh" ] && echo true || echo false)"
 assert_eq "kimi driver exists" "true" \
     "$([ -f "$DRIVERS_DIR/kimi-cli.sh" ] && echo true || echo false)"
+assert_eq "qwen driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/qwen-cli.sh" ] && echo true || echo false)"
 assert_eq "_common.sh exists" "true" \
     "$([ -f "$DRIVERS_DIR/_common.sh" ] && echo true || echo false)"
 
@@ -423,6 +425,12 @@ for fn in "${_required_fns[@]}"; do
         "$(type -t "$fn" &>/dev/null && echo true || echo false)"
 done
 
+source "$DRIVERS_DIR/qwen-cli.sh"
+for fn in "${_required_fns[@]}"; do
+    assert_eq "qwen has $fn" "true" \
+        "$(type -t "$fn" &>/dev/null && echo true || echo false)"
+done
+
 # ============================================================
 echo ""
 echo "=== 17. Gemini CLI driver — role interface ==="
@@ -556,6 +564,9 @@ assert_eq "codex default model" "gpt-5.4" "$(agent_default_model)"
 
 source "$DRIVERS_DIR/kimi-cli.sh"
 assert_eq "kimi default model" "kimi-code/kimi-for-coding" "$(agent_default_model)"
+
+source "$DRIVERS_DIR/qwen-cli.sh"
+assert_eq "qwen default model" "qwen3.8-max" "$(agent_default_model)"
 
 # ============================================================
 echo ""
@@ -1327,7 +1338,7 @@ assert_eq "_run_reaped is defined" "function" \
 # `| stdbuf -oL tee "$logfile"` form is absent. Pin both per
 # driver. fake.sh is intentionally exempt -- it emits synthetic
 # JSONL inline and never spawns external children.
-for _drv in claude-code codex-cli gemini-cli kimi-cli; do
+for _drv in claude-code codex-cli gemini-cli kimi-cli qwen-cli; do
     assert_eq "$_drv: adopts _run_reaped" "1" \
         "$(grep -cE '^[[:space:]]*_run_reaped "\$logfile"' "$DRIVERS_DIR/$_drv.sh")"
     assert_eq "$_drv: drops bare tee pipe" "0" \
@@ -2010,6 +2021,523 @@ LINE1=$(echo "$AGENTS" | sed -n '1p')
 LINE2=$(echo "$AGENTS" | sed -n '2p')
 assert_eq "kimi agent1 inherits top driver" "kimi-cli"  "$LINE1"
 assert_eq "kimi agent2 per-agent driver"    "codex-cli" "$LINE2"
+
+# ============================================================
+echo ""
+echo "=== 50. Qwen driver — role interface ==="
+
+source "$DRIVERS_DIR/qwen-cli.sh"
+
+assert_eq "qwen name"    "Qwen Code CLI" "$(agent_name)"
+assert_eq "qwen cmd"     "qwen"          "$(agent_cmd)"
+assert_eq "qwen default" "qwen3.8-max"   "$(agent_default_model)"
+
+QWEN_JQ=$(agent_activity_jq)
+assert_not_empty "qwen jq filter" "$QWEN_JQ"
+assert_contains "qwen jq has tool_use" "tool_use" "$QWEN_JQ"
+assert_contains "qwen jq has run_shell_command" "run_shell_command" "$QWEN_JQ"
+
+QWEN_INSTALL=$(agent_install_cmd)
+assert_contains "qwen install uses npm package" \
+    "@qwen-code/qwen-code" "$QWEN_INSTALL"
+assert_contains "qwen install supports version" "QWEN_CLI_VERSION" "$QWEN_INSTALL"
+
+# The build-arg is threaded into the npm tag verbatim; an empty
+# value expands to no tag ("latest"), so no conditional is needed
+# on the Dockerfile side.
+assert_contains "qwen install passes build-arg through" \
+    '@qwen-code/qwen-code${QWEN_CLI_VERSION:+@$QWEN_CLI_VERSION}' \
+    "$QWEN_INSTALL"
+
+# The headless command shape depends on auth: with DASHSCOPE_API_KEY
+# the driver synthesizes ~/.qwen/settings.json from the env and the
+# -m target is the provider entry id (prefix stripped); without a
+# key the mounted host config owns the aliases and the swarmfile
+# alias is passed verbatim.
+(
+    unset QWEN_BASE_URL QWEN_REASONING_EFFORT QWEN_CONTEXT_WINDOW
+    HOME="$TMPDIR/qwen-shape-home" DASHSCOPE_API_KEY="sk-sp-test" \
+        bash -c '
+            source "$1"
+            _run_reaped() { shift; printf "%s\n" "$*"; }
+            agent_run "dashscope/qwen3.8-max" "p" "$2/shape.log"
+        ' _ "$DRIVERS_DIR/qwen-cli.sh" "$TMPDIR"
+) > "$TMPDIR/qwen-shape-key.txt"
+assert_eq "qwen apikey: -m alias not passed" "0" \
+    "$(grep -c -- '-m dashscope/qwen3.8-max' \
+        "$TMPDIR/qwen-shape-key.txt" || true)"
+assert_contains "qwen apikey: -m target" \
+    "-m qwen3.8-max" "$(cat "$TMPDIR/qwen-shape-key.txt")"
+assert_contains "qwen apikey: yolo passed" \
+    "--yolo" "$(cat "$TMPDIR/qwen-shape-key.txt")"
+assert_contains "qwen apikey: stream-json" \
+    "stream-json" "$(cat "$TMPDIR/qwen-shape-key.txt")"
+assert_eq "qwen apikey: settings synthesized" "qwen3.8-max" \
+    "$(jq -r '.model.name' "$TMPDIR/qwen-shape-home/.qwen/settings.json")"
+assert_eq "qwen apikey: auth type openai" "openai" \
+    "$(jq -r '.security.auth.selectedType' \
+        "$TMPDIR/qwen-shape-home/.qwen/settings.json")"
+assert_eq "qwen apikey: envKey" "DASHSCOPE_API_KEY" \
+    "$(jq -r '.modelProviders.openai[0].envKey' \
+        "$TMPDIR/qwen-shape-home/.qwen/settings.json")"
+
+(
+    unset DASHSCOPE_API_KEY
+    HOME="$TMPDIR/qwen-shape-home2" \
+        bash -c '
+            source "$1"
+            _run_reaped() { shift; printf "%s\n" "$*"; }
+            agent_run "dashscope/qwen3.8-max" "p" "$2/shape.log"
+        ' _ "$DRIVERS_DIR/qwen-cli.sh" "$TMPDIR"
+) > "$TMPDIR/qwen-shape-oauth.txt"
+assert_contains "qwen oauth: -m alias verbatim" \
+    "-m dashscope/qwen3.8-max" "$(cat "$TMPDIR/qwen-shape-oauth.txt")"
+assert_eq "qwen oauth: no settings written" "false" \
+    "$([ -e "$TMPDIR/qwen-shape-home2/.qwen/settings.json" ] \
+        && echo true || echo false)"
+
+# The append-system-prompt file is inlined as text (qwen's flag
+# takes the prompt, not a path).
+(
+    unset DASHSCOPE_API_KEY
+    echo "EXTRA RULES" > "$TMPDIR/qwen-append.md"
+    HOME="$TMPDIR/qwen-shape-home3" \
+        bash -c '
+            source "$1"
+            _run_reaped() { shift; printf "%s\n" "$*"; }
+            agent_run "qwen3.8-max" "p" "$2/shape.log" "$2/qwen-append.md"
+        ' _ "$DRIVERS_DIR/qwen-cli.sh" "$TMPDIR"
+) > "$TMPDIR/qwen-shape-append.txt"
+assert_contains "qwen append inlined" \
+    "--append-system-prompt EXTRA RULES" \
+    "$(cat "$TMPDIR/qwen-shape-append.txt")"
+
+# Optional env knobs land in the synthesized provider entry.
+HOME="$TMPDIR/qwen-shape-home4" \
+    QWEN_BASE_URL="https://example.com/v1" \
+    QWEN_REASONING_EFFORT="high" \
+    QWEN_CONTEXT_WINDOW="1000000" \
+    DASHSCOPE_API_KEY="sk-sp-test" \
+    bash -c '
+        source "$1"
+        _run_reaped() { shift; :; }
+        agent_run "qwen3.8-max" "p" "$2/shape.log"
+    ' _ "$DRIVERS_DIR/qwen-cli.sh" "$TMPDIR"
+assert_eq "qwen base_url in settings" "https://example.com/v1" \
+    "$(jq -r '.modelProviders.openai[0].baseUrl' \
+        "$TMPDIR/qwen-shape-home4/.qwen/settings.json")"
+assert_eq "qwen context window in settings" "1000000" \
+    "$(jq -r '.modelProviders.openai[0].generationConfig.contextWindowSize' \
+        "$TMPDIR/qwen-shape-home4/.qwen/settings.json")"
+assert_eq "qwen effort in settings" "high" \
+    "$(jq -r '.model.reasoningEffort' \
+        "$TMPDIR/qwen-shape-home4/.qwen/settings.json")"
+
+# Unset knobs stay out of the file entirely.
+assert_eq "qwen no base_url key when unset" "false" \
+    "$(jq 'has("baseUrl")' < <(jq '.modelProviders.openai[0]' \
+        "$TMPDIR/qwen-shape-home/.qwen/settings.json"))"
+assert_eq "qwen no generationConfig when unset" "false" \
+    "$(jq 'has("generationConfig")' < <(jq '.modelProviders.openai[0]' \
+        "$TMPDIR/qwen-shape-home/.qwen/settings.json"))"
+assert_eq "qwen no reasoningEffort when unset" "false" \
+    "$(jq 'has("reasoningEffort")' < <(jq '.model' \
+        "$TMPDIR/qwen-shape-home/.qwen/settings.json"))"
+
+# ============================================================
+echo ""
+echo "=== 51. Qwen driver — agent_settings ==="
+
+QWORK="$TMPDIR/qwen-workspace"
+mkdir -p "$QWORK/.git/info"
+
+# 51a. Staged oauth mount is copied to a writable home dir.
+QHOME1="$TMPDIR/qwen-home1"
+mkdir -p "$QHOME1/.qwen-host"
+echo "token" > "$QHOME1/.qwen-host/oauth_creds.json"
+HOME="$QHOME1" agent_settings "$QWORK"
+assert_eq "qwen staged dir copied" "token" \
+    "$(cat "$QHOME1/.qwen/oauth_creds.json")"
+
+# 51b. An existing home dir is never overwritten by the staged copy.
+QHOME2="$TMPDIR/qwen-home2"
+mkdir -p "$QHOME2/.qwen" "$QHOME2/.qwen-host"
+echo "local" > "$QHOME2/.qwen/oauth_creds.json"
+echo "host"  > "$QHOME2/.qwen-host/oauth_creds.json"
+HOME="$QHOME2" agent_settings "$QWORK"
+assert_eq "qwen existing home wins" "local" \
+    "$(cat "$QHOME2/.qwen/oauth_creds.json")"
+
+# 51c. No staged mount: no home dir created (apikey auth needs no
+# files on disk at settings time).
+QHOME3="$TMPDIR/qwen-home3"
+mkdir -p "$QHOME3"
+HOME="$QHOME3" agent_settings "$QWORK"
+assert_eq "qwen no home without staged mount" "false" \
+    "$([ -e "$QHOME3/.qwen" ] && echo true || echo false)"
+
+# 51d. AGENTS.md bridge: .claude/CLAUDE.md copied when no AGENTS.md.
+QWORK_B="$TMPDIR/qwen-bridge"
+mkdir -p "$QWORK_B/.claude" "$QWORK_B/.git/info"
+echo "# Project rules" > "$QWORK_B/.claude/CLAUDE.md"
+HOME="$QHOME3" agent_settings "$QWORK_B"
+assert_eq "qwen AGENTS.md bridged" "# Project rules" \
+    "$(cat "$QWORK_B/AGENTS.md")"
+assert_contains "qwen AGENTS.md in git exclude" "AGENTS.md" \
+    "$(cat "$QWORK_B/.git/info/exclude")"
+
+# 51e. Existing AGENTS.md not overwritten.
+QWORK_C="$TMPDIR/qwen-bridge-existing"
+mkdir -p "$QWORK_C/.claude" "$QWORK_C/.git/info"
+echo "# Qwen rules" > "$QWORK_C/AGENTS.md"
+echo "# Claude rules" > "$QWORK_C/.claude/CLAUDE.md"
+HOME="$QHOME3" agent_settings "$QWORK_C"
+assert_eq "qwen existing AGENTS.md preserved" "# Qwen rules" \
+    "$(cat "$QWORK_C/AGENTS.md")"
+
+# 51f. A native QWEN.md also suppresses the bridge.
+QWORK_D="$TMPDIR/qwen-bridge-qwenmd"
+mkdir -p "$QWORK_D/.claude" "$QWORK_D/.git/info"
+echo "# Native qwen rules" > "$QWORK_D/QWEN.md"
+echo "# Claude rules" > "$QWORK_D/.claude/CLAUDE.md"
+HOME="$QHOME3" agent_settings "$QWORK_D"
+assert_eq "qwen QWEN.md suppresses bridge" "false" \
+    "$([ -f "$QWORK_D/AGENTS.md" ] && echo true || echo false)"
+
+# 51g. Skills bridge: .claude/skills/ symlinked to .qwen/skills/.
+QWORK_E="$TMPDIR/qwen-skills"
+mkdir -p "$QWORK_E/.claude/skills/triage" "$QWORK_E/.git/info"
+echo "---" > "$QWORK_E/.claude/skills/triage/SKILL.md"
+HOME="$QHOME3" agent_settings "$QWORK_E"
+assert_eq "qwen skills symlink created" "true" \
+    "$([ -L "$QWORK_E/.qwen/skills" ] && echo true || echo false)"
+assert_eq "qwen skill resolves" "---" \
+    "$(cat "$QWORK_E/.qwen/skills/triage/SKILL.md")"
+assert_contains "qwen .qwen/skills in git exclude" ".qwen/skills" \
+    "$(cat "$QWORK_E/.git/info/exclude")"
+
+# 51h. Existing .qwen/skills/ not overwritten.
+QWORK_F="$TMPDIR/qwen-skills-existing"
+mkdir -p "$QWORK_F/.qwen/skills/custom" "$QWORK_F/.claude/skills/other" \
+    "$QWORK_F/.git/info"
+echo "custom" > "$QWORK_F/.qwen/skills/custom/SKILL.md"
+HOME="$QHOME3" agent_settings "$QWORK_F"
+assert_eq "qwen existing .qwen/skills preserved" "custom" \
+    "$(cat "$QWORK_F/.qwen/skills/custom/SKILL.md")"
+assert_eq "qwen .qwen/skills not a symlink" "false" \
+    "$([ -L "$QWORK_F/.qwen/skills" ] && echo true || echo false)"
+
+# 51i. AGENTS.md bridge: root CLAUDE.md used as fallback.
+QWORK_G="$TMPDIR/qwen-bridge-root"
+mkdir -p "$QWORK_G/.git/info"
+echo "# Root rules" > "$QWORK_G/CLAUDE.md"
+HOME="$QHOME3" agent_settings "$QWORK_G"
+assert_eq "qwen AGENTS.md from root CLAUDE.md" "# Root rules" \
+    "$(cat "$QWORK_G/AGENTS.md")"
+
+# ============================================================
+echo ""
+echo "=== 52. Qwen driver — agent_extract_stats ==="
+
+cat > "$TMPDIR/qwen-session.jsonl" <<'EOF'
+{"type":"system","subtype":"session_start","session_id":"s1"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"run_shell_command","input":{"command":"ls"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1234,"result":"Done.","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10}}
+EOF
+
+QSTATS=$(agent_extract_stats "$TMPDIR/qwen-session.jsonl")
+IFS=$'\t' read -r q_cost q_in q_out q_cache_rd q_cache_cr q_dur q_api_ms q_turns <<< "$QSTATS"
+
+assert_eq "qwen cost is 0 (no cost in stream-json)" "0" "$q_cost"
+assert_eq "qwen tok_in"  "100" "$q_in"
+assert_eq "qwen tok_out" "50"  "$q_out"
+assert_eq "qwen cache_rd" "10" "$q_cache_rd"
+assert_eq "qwen duration" "1234" "$q_dur"
+assert_eq "qwen turns falls back to assistant count" "2" "$q_turns"
+
+# num_turns on the result object wins over the assistant count.
+cat > "$TMPDIR/qwen-turns.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":7,"usage":{"input_tokens":1,"output_tokens":1}}
+EOF
+QSTATS=$(agent_extract_stats "$TMPDIR/qwen-turns.jsonl")
+IFS=$'\t' read -r q_cost q_in q_out q_cache_rd q_cache_cr q_dur q_api_ms q_turns <<< "$QSTATS"
+assert_eq "qwen num_turns from result" "7" "$q_turns"
+
+# Empty log: all zeroes.
+: > "$TMPDIR/qwen-empty.jsonl"
+QSTATS_EMPTY=$(agent_extract_stats "$TMPDIR/qwen-empty.jsonl")
+IFS=$'\t' read -r q_cost q_in q_out q_cache_rd q_cache_cr q_dur q_api_ms q_turns <<< "$QSTATS_EMPTY"
+assert_eq "qwen empty cost"  "0" "$q_cost"
+assert_eq "qwen empty turns" "0" "$q_turns"
+
+# ============================================================
+echo ""
+echo "=== 53. Qwen driver — agent_detect_fatal ==="
+
+# Fatal: terminal result object with is_error:true.
+cat > "$TMPDIR/qwen-iserror.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"401 Invalid API-key"}
+EOF
+QFATAL=$(agent_detect_fatal "$TMPDIR/qwen-iserror.jsonl" 1)
+assert_contains "qwen is_error detected" "401 Invalid API-key" "$QFATAL"
+
+# Fatal: stderr error with no assistant output.
+: > "$TMPDIR/qwen-stderr.jsonl"
+cat > "$TMPDIR/qwen-stderr.jsonl.err" <<'EOF'
+Error: Unauthorized - invalid API key
+EOF
+QFATAL=$(agent_detect_fatal "$TMPDIR/qwen-stderr.jsonl" 1)
+assert_not_empty "qwen stderr error detected" "$QFATAL"
+assert_contains "qwen fatal mentions unauthorized" "Unauthorized" "$QFATAL"
+
+# Not fatal: successful result with is_error:false.
+cat > "$TMPDIR/qwen-ok.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Done."}
+EOF
+QOK=$(agent_detect_fatal "$TMPDIR/qwen-ok.jsonl" 0)
+assert_eq "qwen ok not flagged" "" "$QOK"
+
+# Not fatal: assistant output present despite stderr noise.
+cat > "$TMPDIR/qwen-noise.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+EOF
+cat > "$TMPDIR/qwen-noise.jsonl.err" <<'EOF'
+Warning: transient error retried successfully
+EOF
+QNOISE=$(agent_detect_fatal "$TMPDIR/qwen-noise.jsonl" 0)
+assert_eq "qwen stderr noise not flagged" "" "$QNOISE"
+
+# ============================================================
+echo ""
+echo "=== 54. Qwen driver — agent_is_retriable ==="
+
+# Rate limit wording from an OpenAI-compatible streaming error.
+cat > "$TMPDIR/qwen-429.jsonl" <<'EOF'
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"OpenAI API Streaming Error: 429 Too many requests"}
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/qwen-429.jsonl" 1)
+assert_not_empty "qwen 429 is retriable" "$RETRY_OUT"
+
+# DashScope's throttling error code (image and text endpoints).
+cat > "$TMPDIR/qwen-throttle.jsonl" <<'EOF'
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"HTTP 429 Throttling.RateQuota"}
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/qwen-throttle.jsonl" 1)
+assert_not_empty "qwen throttling is retriable" "$RETRY_OUT"
+
+: > "$TMPDIR/qwen-rate-stderr.jsonl"
+cat > "$TMPDIR/qwen-rate-stderr.jsonl.err" <<'EOF'
+Error: rate limit exceeded, please retry later
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/qwen-rate-stderr.jsonl" 1)
+assert_not_empty "qwen rate limit in stderr is retriable" "$RETRY_OUT"
+
+cat > "$TMPDIR/qwen-503.jsonl" <<'EOF'
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"503 service unavailable"}
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/qwen-503.jsonl" 1)
+assert_not_empty "qwen 503 is retriable" "$RETRY_OUT"
+
+: > "$TMPDIR/qwen-auth-err.jsonl"
+cat > "$TMPDIR/qwen-auth-err.jsonl.err" <<'EOF'
+Error: Invalid API key
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/qwen-auth-err.jsonl" 1)
+assert_eq "qwen auth error not retriable" "" "$RETRY_OUT"
+
+# ============================================================
+echo ""
+echo "=== 55. Qwen driver — agent_docker_env ==="
+
+QWEN_ENV=$(agent_docker_env "high")
+assert_contains "qwen docker_env effort flag" \
+    "QWEN_REASONING_EFFORT=high" "$QWEN_ENV"
+
+QWEN_ENV=$(agent_docker_env "")
+assert_eq "qwen docker_env empty effort" "" "$QWEN_ENV"
+
+# ============================================================
+echo ""
+echo "=== 56. Qwen driver — agent_docker_auth ==="
+
+# API key from per-agent config (explicit apikey mode).
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
+    agent_docker_auth "sk-sp-key" "" "apikey" "")
+assert_contains "qwen per-agent key" "DASHSCOPE_API_KEY=sk-sp-key" "$AUTH_OUT"
+assert_contains "qwen per-agent label" "SWARM_AUTH_MODE=key" "$AUTH_OUT"
+assert_contains "qwen yolo warning suppressed" \
+    "QWEN_CODE_SUPPRESS_YOLO_WARNING=1" "$AUTH_OUT"
+
+# API key from environment (explicit apikey mode).
+AUTH_OUT=$(QWEN_API_KEY="sk-env-key" DASHSCOPE_API_KEY="" \
+    QWEN_HOME="/nonexistent" agent_docker_auth "" "" "apikey" "")
+assert_contains "qwen env key" "DASHSCOPE_API_KEY=sk-env-key" "$AUTH_OUT"
+assert_contains "qwen env key label" "SWARM_AUTH_MODE=key" "$AUTH_OUT"
+
+# DASHSCOPE_API_KEY is accepted as a host-side fallback.
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="sk-dash-key" \
+    QWEN_HOME="/nonexistent" agent_docker_auth "" "" "apikey" "")
+assert_contains "qwen dashscope env key" \
+    "DASHSCOPE_API_KEY=sk-dash-key" "$AUTH_OUT"
+
+# Per-agent overrides env.
+AUTH_OUT=$(QWEN_API_KEY="sk-env" DASHSCOPE_API_KEY="" \
+    QWEN_HOME="/nonexistent" agent_docker_auth "sk-agent" "" "apikey" "")
+assert_contains "qwen per-agent overrides env" \
+    "DASHSCOPE_API_KEY=sk-agent" "$AUTH_OUT"
+
+# base_url feeds the synthesized provider entry's endpoint.
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
+    agent_docker_auth "sk-sp" "" "apikey" "https://api.example.com/v1")
+assert_contains "qwen base_url forwarded" \
+    "QWEN_BASE_URL=https://api.example.com/v1" "$AUTH_OUT"
+
+# No credentials at all.
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
+    agent_docker_auth "" "" "" "")
+assert_contains "qwen no creds has auth mode" "SWARM_AUTH_MODE=" "$AUTH_OUT"
+_key_count=$(echo "$AUTH_OUT" | grep -c "DASHSCOPE_API_KEY" || true)
+assert_eq "qwen no creds no key flag" "0" "$_key_count"
+
+# OAuth mode: mounts the host home dir read-only.
+_fake_qwen_home="$TMPDIR/fake-qwen-home"
+mkdir -p "$_fake_qwen_home"
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="$_fake_qwen_home" \
+    agent_docker_auth "" "" "oauth" "")
+assert_contains "qwen oauth mounts home dir" "$_fake_qwen_home" "$AUTH_OUT"
+assert_contains "qwen oauth mount flag" "--mount" "$AUTH_OUT"
+assert_contains "qwen oauth mount readonly" "readonly" "$AUTH_OUT"
+assert_contains "qwen oauth label" "SWARM_AUTH_MODE=oauth" "$AUTH_OUT"
+_key_count=$(echo "$AUTH_OUT" | grep -c "DASHSCOPE_API_KEY" || true)
+assert_eq "qwen oauth no api key" "0" "$_key_count"
+
+# OAuth mode but home dir missing: warns, no mount.
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
+    agent_docker_auth "" "" "oauth" "" 2>/dev/null)
+_mount_count=$(echo "$AUTH_OUT" | grep -c "\-\-mount" || true)
+assert_eq "qwen oauth missing no mount" "0" "$_mount_count"
+
+# Auto-detect: API key + home dir both present.
+AUTH_OUT=$(QWEN_API_KEY="sk-both" DASHSCOPE_API_KEY="" \
+    QWEN_HOME="$_fake_qwen_home" agent_docker_auth "" "" "" "")
+assert_contains "qwen auto has api key" "DASHSCOPE_API_KEY=sk-both" "$AUTH_OUT"
+assert_contains "qwen auto mounts home dir" "$_fake_qwen_home" "$AUTH_OUT"
+assert_contains "qwen auto label" "SWARM_AUTH_MODE=auto" "$AUTH_OUT"
+
+# Auto-detect: only home dir, no key.
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" \
+    QWEN_HOME="$_fake_qwen_home" agent_docker_auth "" "" "" "")
+assert_contains "qwen auto oauth-only mount" "$_fake_qwen_home" "$AUTH_OUT"
+assert_contains "qwen auto oauth-only label" "SWARM_AUTH_MODE=oauth" "$AUTH_OUT"
+
+# ============================================================
+echo ""
+echo "=== 57. Qwen driver — activity jq filter via file boundary ==="
+
+source "$DRIVERS_DIR/qwen-cli.sh"
+agent_activity_jq > "$TMPDIR/qwen.jq"
+
+QWEN_SHELL='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"run_shell_command","input":{"command":"npm test"}}]}}'
+Q_SHELL_OUT=$(echo "$QWEN_SHELL" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq shell" "Shell:" "$Q_SHELL_OUT"
+assert_contains "qwen jq shell command" "npm test" "$Q_SHELL_OUT"
+
+QWEN_READ='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"read_file","input":{"file_path":"src/main.ts"}}]}}'
+Q_READ_OUT=$(echo "$QWEN_READ" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq read" "Read " "$Q_READ_OUT"
+assert_contains "qwen jq read path" "src/main.ts" "$Q_READ_OUT"
+
+QWEN_EDIT='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"edit","input":{"file_path":"/workspace/src/utils.ts"}}]}}'
+Q_EDIT_OUT=$(echo "$QWEN_EDIT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq edit" "Edit " "$Q_EDIT_OUT"
+assert_contains "qwen jq edit path" "/workspace/src/utils.ts" "$Q_EDIT_OUT"
+
+QWEN_GREP='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"grep_search","input":{"pattern":"TODO"}}]}}'
+Q_GREP_OUT=$(echo "$QWEN_GREP" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq grep" "Grep " "$Q_GREP_OUT"
+assert_contains "qwen jq grep pattern" "TODO" "$Q_GREP_OUT"
+
+QWEN_SEARCH='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"web_search","input":{"query":"qwen stream-json"}}]}}'
+Q_SEARCH_OUT=$(echo "$QWEN_SEARCH" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq web_search" "Search:" "$Q_SEARCH_OUT"
+
+QWEN_AGENT='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"agent","input":{"description":"explore repo"}}]}}'
+Q_AGENT_OUT=$(echo "$QWEN_AGENT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq agent" "Agent:" "$Q_AGENT_OUT"
+assert_contains "qwen jq agent description" "explore repo" "$Q_AGENT_OUT"
+
+QWEN_THINK='{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"checking the config"}]}}'
+Q_THINK_OUT=$(echo "$QWEN_THINK" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq thinking" "Think:" "$Q_THINK_OUT"
+
+QWEN_UNKNOWN='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"todo_write","input":{}}]}}'
+Q_UNK_OUT=$(echo "$QWEN_UNKNOWN" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "qwen jq unknown tool" "todo_write" "$Q_UNK_OUT"
+
+# Result, system, and text-only assistant messages are silently
+# skipped -- only tool calls and thinking carry the signal.
+QWEN_RESULT='{"type":"result","subtype":"success","is_error":false}'
+Q_RESULT_OUT=$(echo "$QWEN_RESULT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_eq "qwen jq result silent" "" "$Q_RESULT_OUT"
+
+QWEN_SYSTEM='{"type":"system","subtype":"session_start","session_id":"s1"}'
+Q_SYSTEM_OUT=$(echo "$QWEN_SYSTEM" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_eq "qwen jq system silent" "" "$Q_SYSTEM_OUT"
+
+QWEN_TEXT='{"type":"assistant","message":{"content":[{"type":"text","text":"All done."}]}}'
+Q_TEXT_OUT=$(echo "$QWEN_TEXT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/qwen.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_eq "qwen jq text-only assistant silent" "" "$Q_TEXT_OUT"
+
+# ============================================================
+echo ""
+echo "=== 58. Qwen driver in config parsing ==="
+
+cat > "$TMPDIR/qwen_cfg.json" <<'EOF'
+{
+  "prompt": "p.md",
+  "driver": "qwen-cli",
+  "agents": [
+    { "count": 1, "model": "qwen3.8-max" },
+    { "count": 1, "model": "gpt-5.4", "driver": "codex-cli" }
+  ]
+}
+EOF
+
+TOP_DRIVER=$(jq -r '.driver // "claude-code"' "$TMPDIR/qwen_cfg.json")
+assert_eq "qwen top-level driver" "qwen-cli" "$TOP_DRIVER"
+
+AGENTS=$(jq -r '.driver as $dd | .agents[] |
+    (.driver // $dd // "claude-code")' "$TMPDIR/qwen_cfg.json")
+LINE1=$(echo "$AGENTS" | sed -n '1p')
+LINE2=$(echo "$AGENTS" | sed -n '2p')
+assert_eq "qwen agent1 inherits top driver" "qwen-cli"  "$LINE1"
+assert_eq "qwen agent2 per-agent driver"    "codex-cli" "$LINE2"
 
 # ============================================================
 echo ""
