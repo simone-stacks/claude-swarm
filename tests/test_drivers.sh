@@ -2038,16 +2038,23 @@ assert_contains "qwen jq has tool_use" "tool_use" "$QWEN_JQ"
 assert_contains "qwen jq has run_shell_command" "run_shell_command" "$QWEN_JQ"
 
 QWEN_INSTALL=$(agent_install_cmd)
-assert_contains "qwen install uses npm package" \
-    "@qwen-code/qwen-code" "$QWEN_INSTALL"
+assert_contains "qwen install uses official script" \
+    "qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh" \
+    "$QWEN_INSTALL"
+assert_contains "qwen install targets /usr/local" \
+    "QWEN_INSTALL_ROOT=/usr/local" "$QWEN_INSTALL"
+assert_contains "qwen install leaves shell rc alone" \
+    "QWEN_NO_MODIFY_PATH=1" "$QWEN_INSTALL"
+assert_contains "qwen install skips the npm fallback" \
+    "QWEN_INSTALL_METHOD=standalone" "$QWEN_INSTALL"
 assert_contains "qwen install supports version" "QWEN_CLI_VERSION" "$QWEN_INSTALL"
 
-# The build-arg is threaded into the npm tag verbatim; an empty
-# value expands to no tag ("latest"), so no conditional is needed
-# on the Dockerfile side.
+# The build-arg is threaded into QWEN_INSTALL_VERSION verbatim, with
+# an explicit "latest" fallback so unpinned builds track the newest
+# release (the script also defaults to a hardcoded version, which
+# would silently freeze unpinned images).
 assert_contains "qwen install passes build-arg through" \
-    '@qwen-code/qwen-code${QWEN_CLI_VERSION:+@$QWEN_CLI_VERSION}' \
-    "$QWEN_INSTALL"
+    'QWEN_INSTALL_VERSION="${QWEN_CLI_VERSION:-latest}"' "$QWEN_INSTALL"
 
 # The headless command shape depends on auth: with DASHSCOPE_API_KEY
 # the driver synthesizes ~/.qwen/settings.json from the env and the

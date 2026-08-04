@@ -32,9 +32,9 @@ RUN if echo ",$SWARM_AGENTS," | grep -q ",claude-code,"; then \
     fi
 ENV PATH="/home/agent/.local/bin:${PATH}"
 
-# --- Node.js (shared by Gemini CLI, Codex CLI and Qwen Code CLI) ---
+# --- Node.js (shared by Gemini CLI and Codex CLI) ---
 USER root
-RUN if echo ",$SWARM_AGENTS," | grep -qE ",(gemini-cli|codex-cli|qwen-cli),"; then \
+RUN if echo ",$SWARM_AGENTS," | grep -qE ",(gemini-cli|codex-cli),"; then \
         curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
         && apt-get install -y --no-install-recommends nodejs \
         && rm -rf /var/lib/apt/lists/*; \
@@ -66,10 +66,16 @@ RUN if echo ",$SWARM_AGENTS," | grep -q ",kimi-cli,"; then \
 
 # --- Qwen Code CLI ---
 ARG QWEN_CLI_VERSION=
+# Official standalone archive (no Node required).  Installs to
+# /usr/local/bin so the agent user finds qwen on PATH without the
+# script editing anyone's shell rc; "latest" when unpinned.
 RUN if echo ",$SWARM_AGENTS," | grep -q ",qwen-cli,"; then \
-        npm install -g "@qwen-code/qwen-code${QWEN_CLI_VERSION:+@$QWEN_CLI_VERSION}" \
-        && mkdir -p /home/agent/.qwen \
-        && chown agent:agent /home/agent/.qwen; \
+        curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh -o /tmp/qwen-install.sh \
+        && QWEN_INSTALL_ROOT=/usr/local QWEN_NO_MODIFY_PATH=1 \
+           QWEN_INSTALL_METHOD=standalone \
+           QWEN_INSTALL_VERSION="${QWEN_CLI_VERSION:-latest}" \
+           bash /tmp/qwen-install.sh \
+        && rm /tmp/qwen-install.sh; \
     fi
 USER agent
 

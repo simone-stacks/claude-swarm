@@ -360,8 +360,11 @@ agent_docker_auth() {
 # QWEN_CLI_VERSION is a Docker build-arg; empty = latest.
 agent_install_cmd() {
     cat <<'INSTALL'
-RUN npm install -g "@qwen-code/qwen-code${QWEN_CLI_VERSION:+@$QWEN_CLI_VERSION}" \
-    && mkdir -p /home/agent/.qwen \
-    && chown agent:agent /home/agent/.qwen
+RUN curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh -o /tmp/qwen-install.sh \
+    && QWEN_INSTALL_ROOT=/usr/local QWEN_NO_MODIFY_PATH=1 \
+       QWEN_INSTALL_METHOD=standalone \
+       QWEN_INSTALL_VERSION="${QWEN_CLI_VERSION:-latest}" \
+       bash /tmp/qwen-install.sh \
+    && rm /tmp/qwen-install.sh
 INSTALL
 }

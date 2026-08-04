@@ -819,9 +819,10 @@ swarmfile:
 { "qwen_cli_version": "0.21.5" }
 ```
 
-The value is forwarded to `npm install -g @qwen-code/qwen-code@<ver>`
-inside the image build.  Leave the field unset (or empty) to
-keep the default "latest published release" behavior.
+The value is passed to the official standalone installer
+(`install-qwen-standalone.sh`, no Node.js required) inside the
+image build.  Leave the field unset (or empty) to install the
+latest release.
 
 ### Writing a new driver
 
