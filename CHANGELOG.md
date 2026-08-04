@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Qwen Code CLI driver.** New `qwen-cli` driver
+  (`lib/drivers/qwen-cli.sh`) implements the full interface for
+  Alibaba's Qwen Code CLI: headless mode with
+  `qwen -p --output-format stream-json --yolo`, activity parsing
+  from stream-json tool calls, fatal/retriable error detection,
+  and reasoning effort support via `model.reasoningEffort`.
+  stream-json carries usage but no cost, so cost comes from the
+  swarmfile `pricing` map.
+- **Qwen auth modes.** Qwen agents authenticate via
+  `"auth": "apikey"` (host `QWEN_API_KEY`/`DASHSCOPE_API_KEY`
+  forwarded as `DASHSCOPE_API_KEY`; the driver synthesizes
+  `~/.qwen/settings.json` with an openai-protocol provider entry,
+  so no login state is needed — the CI-friendly path) or
+  `"auth": "oauth"` (read-only mount of the host `~/.qwen` home
+  dir after `qwen` `/auth` or `bl config agent`; each container
+  copies it to a writable location on startup). Auto-detection
+  when both are present. Set the per-group `base_url` to match
+  the account region: ModelStudio keys are region-scoped and the
+  CLI's built-in default endpoint is cn-beijing, which returns
+  401 for international accounts.
+- **Build: `qwen_cli_version` swarmfile field.** Pins the Qwen
+  Code CLI version installed in the agent image, mirroring
+  `codex_cli_version`.
 - **Kimi Code CLI driver.** New `kimi-cli` driver
   (`lib/drivers/kimi-cli.sh`) implements the full interface for
   Moonshot AI's Kimi Code CLI: headless mode with

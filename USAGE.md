@@ -44,6 +44,8 @@ Credentials stay as env vars (not in shell history).
 | `GEMINI_API_KEY` | | Google API key (for Gemini CLI driver). |
 | `KIMI_API_KEY` | | Moonshot API key (for Kimi Code CLI driver). |
 | `KIMI_CODE_HOME` | `~/.kimi-code` | Path to Kimi data dir (OAuth login state). |
+| `QWEN_API_KEY` | | ModelStudio/DashScope API key (for Qwen Code CLI driver; `DASHSCOPE_API_KEY` also accepted). |
+| `QWEN_HOME` | `~/.qwen` | Path to Qwen home dir (login state and `settings.json`). |
 | `SWARM_CONFIG` | | Path to swarmfile (or place `swarm.json` in repo root). |
 | `SWARM_TITLE` | | Dashboard title override. |
 | `SWARM_SKIP_DEP_CHECK` | | Set to `1` to silence dependency version warnings. |
@@ -82,13 +84,17 @@ Per-group fields in `swarm.json` `agents` array:
 - Kimi Code CLI: `low`, `medium`, `high`, `xhigh`, `max`, but the set a
   model actually accepts is model-dependent — `kimi-for-coding` rejects
   `medium` and `xhigh` with a 400; use `low`, `high`, or `max` there.
+- Qwen Code CLI: `low`, `medium`, `high`, `xhigh`, `max` (written to
+  `model.reasoningEffort`; on DashScope-backed qwen models any set tier
+  currently collapses to `enable_thinking: true`).
 - Gemini CLI: ignored.
 
 Top-level fields: `prompt`, `setup`, `max_idle` (default: `3`),
 `max_retry_wait`, `driver`, `inject_git_rules`,
 `git_user` (`name`, `email`, `signing_key`),
 `claude_code_version`, `codex_cli_version`, `kimi_cli_version`,
-`title`, `tag`, `pricing`, `docker_args`, `post_process`.
+`qwen_cli_version`, `title`, `tag`, `pricing`, `docker_args`,
+`post_process`.
 
 ### Interactive profiles
 
@@ -637,6 +643,48 @@ The data dir is bind-mounted read-only; each container copies it to
 a writable location on startup.  Override the source path with
 `KIMI_CODE_HOME=/path/to/kimi-home`.
 
+### Qwen Code CLI
+
+| `auth` value | Credential injected |
+|---|---|
+| `apikey` | `QWEN_API_KEY`/`DASHSCOPE_API_KEY` forwarded as `DASHSCOPE_API_KEY` |
+| `oauth` | Mounts `~/.qwen` (after `qwen` + `/auth` or `bl config agent` on the host) |
+| omit | API key if set + home dir if found |
+
+With `apikey` auth the driver synthesizes `~/.qwen/settings.json`
+inside the container: one openai-protocol provider entry whose id is
+the swarmfile `model` (provider prefix stripped), key read from
+`DASHSCOPE_API_KEY`, `security.auth.selectedType: openai` so no
+interactive `/auth` is needed.  This is the CI-friendly path — no
+login state to mount:
+
+```json
+{
+  "driver": "qwen-cli",
+  "agents": [{
+    "model": "qwen3.8-max",
+    "auth": "apikey",
+    "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+  }]
+}
+```
+
+Mind the region: ModelStudio keys are region-scoped, and qwen-code's
+built-in default endpoint is China (cn-beijing).  International
+accounts must set `base_url` (as above for a Token Plan key, or
+`https://dashscope-intl.aliyuncs.com/compatible-mode/v1` for a
+standard pay-as-you-go key) or every request fails with
+`401 Invalid API-key`.  Optional overrides: `QWEN_CONTEXT_WINDOW`
+(adds `generationConfig.contextWindowSize` to the synthesized
+provider entry).
+
+For OAuth auth, configure `~/.qwen` on the host (run `qwen` and use
+`/auth`, or `bl config agent --agent qwen-code` for Alibaba Cloud
+ModelStudio), then set `"auth": "oauth"` in your swarm config.  The
+home dir is bind-mounted read-only; each container copies it to a
+writable location on startup.  Override the source path with
+`QWEN_HOME=/path/to/qwen-home`.
+
 ### General rules
 
 Groups with `api_key` or `auth_token` ignore the `auth`
@@ -699,6 +747,7 @@ Built-in drivers:
 | `gemini-cli` | `gemini` | |
 | `codex-cli` | `codex` | |
 | `kimi-cli` | `kimi` | |
+| `qwen-cli` | `qwen` | |
 | `fake` | (none) | Test double for unit testing |
 
 Set the driver globally in `swarm.json`:
@@ -758,6 +807,20 @@ swarmfile:
 The value is passed to the official install script
 (`code.kimi.com/kimi-code/install.sh`) inside the image build.
 Leave the field unset (or empty) to install the latest release.
+
+### Pinning Qwen Code CLI version
+
+By default the Docker image installs the latest Qwen Code CLI.
+To pin a specific version, set `qwen_cli_version` in the
+swarmfile:
+
+```json
+{ "qwen_cli_version": "0.21.5" }
+```
+
+The value is forwarded to `npm install -g @qwen-code/qwen-code@<ver>`
+inside the image build.  Leave the field unset (or empty) to
+keep the default "latest published release" behavior.
 
 ### Writing a new driver
 
