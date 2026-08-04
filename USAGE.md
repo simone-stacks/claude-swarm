@@ -674,9 +674,10 @@ built-in default endpoint is China (cn-beijing).  International
 accounts must set `base_url` (as above for a Token Plan key, or
 `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` for a
 standard pay-as-you-go key) or every request fails with
-`401 Invalid API-key`.  Optional overrides: `QWEN_CONTEXT_WINDOW`
-(adds `generationConfig.contextWindowSize` to the synthesized
-provider entry).
+`401 Invalid API-key`.  Optional host-side override:
+`QWEN_CONTEXT_WINDOW` (forwarded into the container; adds
+`generationConfig.contextWindowSize` to the synthesized provider
+entry — e.g. `1000000` for qwen3.8-max's 1M window).
 
 For OAuth auth, configure `~/.qwen` on the host (run `qwen` and use
 `/auth`, or `bl config agent --agent qwen-code` for Alibaba Cloud

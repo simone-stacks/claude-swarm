@@ -289,7 +289,8 @@ agent_docker_env() {
 
 # Resolve auth credentials and emit Docker flags.
 # Args: <api_key> <auth_token> <auth_mode> <base_url>
-# Reads host env: QWEN_API_KEY, DASHSCOPE_API_KEY, QWEN_HOME
+# Reads host env: QWEN_API_KEY, DASHSCOPE_API_KEY, QWEN_HOME,
+#                 QWEN_CONTEXT_WINDOW
 #
 # Auth modes:
 #   oauth   — Mount the host qwen dir (~/.qwen) after `qwen` /auth
@@ -340,6 +341,13 @@ agent_docker_auth() {
 
     if [ -n "$base_url" ]; then
         printf -- '-e\nQWEN_BASE_URL=%s\n' "$base_url"
+    fi
+
+    # Optional context-window override, picked up by the settings
+    # writer for the synthesized provider entry (e.g. 1000000 for
+    # qwen3.8-max's 1M window).
+    if [ -n "${QWEN_CONTEXT_WINDOW:-}" ]; then
+        printf -- '-e\nQWEN_CONTEXT_WINDOW=%s\n' "$QWEN_CONTEXT_WINDOW"
     fi
 
     # Headless runs always pass --yolo; silence the one-line

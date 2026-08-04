@@ -2396,6 +2396,13 @@ AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
 assert_contains "qwen base_url forwarded" \
     "QWEN_BASE_URL=https://api.example.com/v1" "$AUTH_OUT"
 
+# QWEN_CONTEXT_WINDOW is forwarded for the settings writer.
+AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
+    QWEN_CONTEXT_WINDOW="1000000" \
+    agent_docker_auth "sk-sp" "" "apikey" "")
+assert_contains "qwen context window forwarded" \
+    "QWEN_CONTEXT_WINDOW=1000000" "$AUTH_OUT"
+
 # No credentials at all.
 AUTH_OUT=$(QWEN_API_KEY="" DASHSCOPE_API_KEY="" QWEN_HOME="/nonexistent" \
     agent_docker_auth "" "" "" "")
