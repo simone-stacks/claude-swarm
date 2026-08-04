@@ -31,8 +31,12 @@
   `kimi -p --output-format stream-json`, activity parsing from
   stream-json tool calls, fatal/retriable error detection, and
   thinking effort support via `KIMI_MODEL_THINKING_EFFORT`.
-  stream-json carries no usage summary, so cost comes from the
-  swarmfile `pricing` map.
+  stream-json carries no usage summary; token usage is summed
+  from the session `wire.jsonl` the CLI persists (one
+  `usage.record` per LLM step), attributed by run-start mark so a
+  staged host home or an earlier retry is never counted. Cache
+  creation folds into `tok_in` (billed as a cache miss upstream);
+  cost comes from the swarmfile `pricing` map.
 - **Kimi auth modes.** Kimi agents authenticate via
   `"auth": "apikey"` (host `KIMI_API_KEY` forwarded as
   `KIMI_MODEL_API_KEY`, which makes the CLI synthesize an in-memory
