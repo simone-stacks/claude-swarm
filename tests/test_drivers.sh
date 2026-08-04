@@ -2308,6 +2308,26 @@ EOF
 QOK=$(agent_detect_fatal "$TMPDIR/qwen-ok.jsonl" 0)
 assert_eq "qwen ok not flagged" "" "$QOK"
 
+# Fatal: provider quota exhaustion reported as a *successful*
+# result (observed on the token plan: is_error:false, exit 0).
+cat > "$TMPDIR/qwen-quota.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Quota exhausted: Your token-plan 5-hour quota has been exhausted. (cause: insufficient_quota: 429)"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Quota exhausted: Your token-plan 5-hour quota has been exhausted. (cause: insufficient_quota: 429)"}
+EOF
+QQUOTA=$(agent_detect_fatal "$TMPDIR/qwen-quota.jsonl" 0)
+assert_contains "qwen quota-as-success detected" "Quota exhausted" "$QQUOTA"
+assert_eq "qwen quota-as-success is retriable" "rate_limited" \
+    "$(agent_is_retriable "$TMPDIR/qwen-quota.jsonl" 0)"
+
+# Not fatal: a successful report that merely mentions quotas in
+# prose stays below the detection threshold.
+cat > "$TMPDIR/qwen-prose.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"The endpoint enforces rate limits."}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Analysis complete: the endpoint enforces rate limits per plan."}
+EOF
+QPROSE=$(agent_detect_fatal "$TMPDIR/qwen-prose.jsonl" 0)
+assert_eq "qwen prose not flagged" "" "$QPROSE"
+
 # Not fatal: assistant output present despite stderr noise.
 cat > "$TMPDIR/qwen-noise.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}

@@ -224,8 +224,10 @@ JQ
 
 # Detect fatal errors in a Qwen session log.
 # A failed run ends with a result object carrying is_error:true;
-# startup failures (bad key, unreachable endpoint) may surface only
-# on stderr with no assistant messages on stdout.
+# provider quota/rate failures are reported as a *successful* result
+# whose text carries the error; startup failures (bad key,
+# unreachable endpoint) may surface only on stderr with no
+# assistant messages on stdout.
 agent_detect_fatal() {
     local logfile="$1"
 
@@ -239,6 +241,23 @@ agent_detect_fatal() {
             echo "$result_line" \
                 | jq -r '.result // .error // "unknown error"' \
                     2>/dev/null
+            return
+        fi
+
+        # qwen-code reports provider quota/rate failures as a
+        # *successful* result (is_error:false, exit 0) with the error
+        # as the result text (observed on token-plan exhaustion:
+        # "Quota exhausted: ... (cause: insufficient_quota: 429 ...)").
+        # Surface the strong provider-error phrases so the harness
+        # enters its backoff loop instead of counting the session as
+        # a successful idle one.  Kept deliberately narrow: a finding
+        # report may legitimately mention "rate limit" in prose.
+        local result_text
+        result_text=$(echo "$result_line" \
+            | jq -r '.result // empty' 2>/dev/null || true)
+        if printf '%s' "$result_text" \
+                | grep -qi 'quota exhausted\|insufficient_quota'; then
+            printf '%s\n' "$result_text" | head -1
             return
         fi
     fi
