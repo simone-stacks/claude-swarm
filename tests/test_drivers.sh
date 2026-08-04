@@ -1775,7 +1775,10 @@ cat > "$TMPDIR/kimi-session.jsonl" <<'EOF'
 {"role":"assistant","content":"Done."}
 EOF
 
-KSTATS=$(agent_extract_stats "$TMPDIR/kimi-session.jsonl")
+# Isolate from any real ~/.kimi-code on the dev machine: with no
+# session wire in sight every token field stays 0.
+KSTATS=$(KIMI_CODE_HOME="$TMPDIR/kimi-nohome" \
+    agent_extract_stats "$TMPDIR/kimi-session.jsonl")
 IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS"
 
 assert_eq "kimi cost is 0 (no usage in stream-json)" "0" "$k_cost"
@@ -1785,10 +1788,57 @@ assert_eq "kimi turns = assistant messages" "2" "$k_turns"
 
 # Empty log: all zeroes.
 : > "$TMPDIR/kimi-empty.jsonl"
-KSTATS_EMPTY=$(agent_extract_stats "$TMPDIR/kimi-empty.jsonl")
+KSTATS_EMPTY=$(KIMI_CODE_HOME="$TMPDIR/kimi-nohome" \
+    agent_extract_stats "$TMPDIR/kimi-empty.jsonl")
 IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS_EMPTY"
 assert_eq "kimi empty cost"  "0" "$k_cost"
 assert_eq "kimi empty turns" "0" "$k_turns"
+
+# Token usage is summed from the session wire.jsonl the CLI persists
+# (one usage.record per LLM step).  Cache creation folds into tok_in
+# (billed as a cache miss upstream).
+KWIRE_HOME="$TMPDIR/kimi-wirehome"
+mkdir -p "$KWIRE_HOME/sessions/wd_test_abc/session_s1/agents/main"
+cat > "$KWIRE_HOME/sessions/wd_test_abc/session_s1/agents/main/wire.jsonl" <<'EOF'
+{"type":"metadata","protocol_version":"1.4","created_at":1785851223263}
+{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":2705,"output":19,"inputCacheRead":18944,"inputCacheCreation":0}}
+{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":728,"output":172,"inputCacheRead":259328,"inputCacheCreation":512}}
+EOF
+# A killed run leaves a truncated tail line; the parser must skip it.
+printf '{"type":"usage.record","usage":{"inputOth' \
+    >> "$KWIRE_HOME/sessions/wd_test_abc/session_s1/agents/main/wire.jsonl"
+
+KSTATS=$(KIMI_CODE_HOME="$KWIRE_HOME" \
+    agent_extract_stats "$TMPDIR/kimi-session.jsonl")
+IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS"
+
+assert_eq "kimi wire tok_in (cache creation = miss)" "3945" "$k_in"
+assert_eq "kimi wire tok_out"  "191"    "$k_out"
+assert_eq "kimi wire cache_rd" "278272" "$k_cache_rd"
+assert_eq "kimi wire cache_cr" "512"    "$k_cache_cr"
+assert_eq "kimi wire turns"    "2"      "$k_turns"
+
+# Wires older than the run mark are not attributed: the staged host
+# home and earlier retries share the same sessions tree.
+mkdir -p "$KWIRE_HOME/sessions/wd_test_abc/session_s0/agents/main"
+cat > "$KWIRE_HOME/sessions/wd_test_abc/session_s0/agents/main/wire.jsonl" <<'EOF'
+{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":9000,"output":900,"inputCacheRead":90000,"inputCacheCreation":90}}
+EOF
+touch -d '1 hour ago' \
+    "$KWIRE_HOME/sessions/wd_test_abc/session_s0/agents/main/wire.jsonl"
+
+KSTATS=$(KIMI_CODE_HOME="$KWIRE_HOME" SWARM_KIMI_RUN_MARK="$(date +%s)" \
+    agent_extract_stats "$TMPDIR/kimi-session.jsonl")
+IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS"
+assert_eq "kimi mark: old wire ignored" "3945" "$k_in"
+
+# A mark newer than every wire attributes nothing.
+KSTATS=$(KIMI_CODE_HOME="$KWIRE_HOME" \
+    SWARM_KIMI_RUN_MARK=$(( $(date +%s) + 3600 )) \
+    agent_extract_stats "$TMPDIR/kimi-session.jsonl")
+IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS"
+assert_eq "kimi future mark: tok_in 0" "0" "$k_in"
+assert_eq "kimi future mark: turns still counted" "2" "$k_turns"
 
 # ============================================================
 echo ""

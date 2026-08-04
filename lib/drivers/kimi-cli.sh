@@ -45,6 +45,12 @@ agent_run() {
     # --auto, or --plan.  Headless mode already runs under the auto
     # permission policy, so there is nothing to opt into.
     #
+    # Remember when this run started: agent_extract_stats sums token
+    # usage from the session wire.jsonl the CLI persists, and the mark
+    # keeps sessions copied in with the staged home (agent_settings)
+    # or left by earlier retries from being attributed to this run.
+    SWARM_KIMI_RUN_MARK=$(date +%s)
+    #
     # _run_reaped puts kimi in its own process group and SIGKILLs
     # the group after kimi exits, so surviving children can't keep
     # the downstream activity-filter pipeline blocked by holding
@@ -124,8 +130,17 @@ agent_settings() {
 
 # Extract stats from a Kimi stream-json log.
 # stream-json emits only assistant, tool, and meta objects -- no
-# usage or cost summary (verified against kimi-code 0.28.0).  Token
-# and cost fields stay 0; cost comes from the swarmfile pricing map.
+# usage or cost summary (verified against kimi-code 0.31.1).  Token
+# usage is summed instead from the session wire the CLI persists at
+# ~/.kimi-code/sessions/<wd>/<session>/agents/main/wire.jsonl: one
+# usage.record per LLM step, with disjoint inputOther /
+# inputCacheRead / inputCacheCreation / output buckets.  Cache
+# creation is billed as a cache miss upstream, so it folds into
+# tok_in; cost comes from the swarmfile pricing map.  Only wires
+# touched since SWARM_KIMI_RUN_MARK (set by agent_run) count, so a
+# staged host home or an earlier retry is never attributed.  Without
+# a mark (standalone invocation) the newest wire is used.  Sub-agent
+# wires (agents/<other>/wire.jsonl) are not summed.
 # turns counts assistant messages, the only per-step signal in the
 # stream.
 agent_extract_stats() {
@@ -134,8 +149,40 @@ agent_extract_stats() {
     turns=$(grep -c '"role"[[:space:]]*:[[:space:]]*"assistant"' \
         "$logfile" 2>/dev/null || true)
     turns="${turns:-0}"
+
+    local tok_in=0 tok_out=0 cache_rd=0 cache_cr=0
+    local _home="${KIMI_CODE_HOME:-${HOME}/.kimi-code}"
+    local _usage_jsonl=""
+    if [ -n "${SWARM_KIMI_RUN_MARK:-}" ]; then
+        _usage_jsonl=$(find "$_home/sessions" \
+            -path '*/agents/main/wire.jsonl' \
+            -newermt "@$(( SWARM_KIMI_RUN_MARK - 2 ))" \
+            -exec cat {} + 2>/dev/null || true)
+    else
+        local _wire
+        _wire=$(ls -t "$_home"/sessions/*/*/agents/main/wire.jsonl \
+            2>/dev/null | head -1 || true)
+        if [ -n "$_wire" ]; then
+            _usage_jsonl=$(cat "$_wire" 2>/dev/null || true)
+        fi
+    fi
+    if [ -n "$_usage_jsonl" ]; then
+        # fromjson? skips the truncated tail line a killed run leaves.
+        local _sums
+        _sums=$(printf '%s\n' "$_usage_jsonl" | jq -Rr '
+            fromjson? // empty
+            | select(.type == "usage.record") | .usage
+            | [ (.inputOther // 0), (.output // 0),
+                (.inputCacheRead // 0), (.inputCacheCreation // 0) ]
+            | @tsv' 2>/dev/null | awk '
+            { i += $1; o += $2; r += $3; c += $4 }
+            END { printf "%d %d %d %d", i, o, r, c }')
+        read -r tok_in tok_out cache_rd cache_cr <<< "${_sums:-0 0 0 0}"
+        tok_in=$(( ${tok_in:-0} + ${cache_cr:-0} ))
+    fi
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" \
-        "0" "0" "0" "0" "0" "0" "0" "$turns"
+        "0" "${tok_in:-0}" "${tok_out:-0}" "${cache_rd:-0}" \
+        "${cache_cr:-0}" "0" "0" "$turns"
 }
 
 # Return the jq program for parsing activity from Kimi stream-json.
