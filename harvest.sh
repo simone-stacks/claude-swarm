@@ -12,7 +12,8 @@ source "$SWARM_DIR/lib/project.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PROJECT="$(swarm_project_id "$(basename "$REPO_ROOT")")"
-BARE_REPO="/tmp/${PROJECT}-upstream.git"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+BARE_REPO="$RUNTIME_DIR/upstream.git"
 REMOTE_NAME="_agent-harvest"
 DRY_RUN=false
 
@@ -28,8 +29,8 @@ Options:
   --dry        Show what would be merged without actually merging.
   -h, --help   Show this help message.
 
-The bare repo is expected at /tmp/<project>-upstream.git,
-created by launch.sh when starting agents.
+The bare repo path is discovered from the owner-only project runtime,
+created by launch.sh when starting agents. Run control.sh paths to inspect it.
 HELP
             exit 0
             ;;
@@ -52,7 +53,7 @@ warn_dirty_interactive_containers() {
                 'cd /workspace && [ -n "$(git status --porcelain=v1)" ] && echo true || echo false' \
                 2>/dev/null || true)
         else
-            tmpf="/tmp/.swarm-harvest-${name}.state"
+            tmpf=$(mktemp "$RUNTIME_DIR/harvest-state.XXXXXX")
             docker cp "${name}:/workspace/agent_logs/interactive_state" \
                 "$tmpf" 2>/dev/null || true
             if [ -s "$tmpf" ]; then
@@ -118,9 +119,8 @@ for branch in "${HARVEST_BRANCHES[@]}"; do
         echo "the bare repo still has the old ancestry. Merging" >&2
         echo "would re-introduce removed commits." >&2
         echo "" >&2
-        echo "Resolve by wiping and recreating the bare repo:" >&2
-        echo "  rm -rf ${BARE_REPO}" >&2
-        echo "  ./launch.sh ...   # recreates the bare from current HEAD" >&2
+        echo "Preserve the runtime and resolve the ancestry explicitly;" >&2
+        echo "the engine will not delete or merge divergent state." >&2
         git remote remove "$REMOTE_NAME"
         exit 1
     fi

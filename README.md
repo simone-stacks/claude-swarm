@@ -36,9 +36,10 @@ Or clone standalone and run from your project directory
 ## How it works
 
 ```
-Host                         /tmp (bare repos)
-~/project/ ── git clone ──>  project-upstream.git (rw)
-               --bare        project-mirror-*.git (ro)
+Host                         private project runtime (0700)
+~/project/ ── git clone ──>  upstream.git (rw)
+               --bare        mirrors/ (ro)
+target repo ── mirror ─────> target.git (ro, one resolved SHA)
                                         |
                                         | docker volumes
                                         |
@@ -46,7 +47,8 @@ Host                         /tmp (bare repos)
                  |           |          |           |
            Container 1            Container 2       ...
            /upstream  (rw)        /upstream  (rw)
-           /mirrors/* (ro)        /mirrors/* (ro)
+           /mirrors   (ro)        /mirrors   (ro)
+           /target-upstream (ro)  /target-upstream (ro)
                  |                      |
                  v                      v
            /workspace/            /workspace/
@@ -63,11 +65,27 @@ human-guided driver UI or shell on a separate
 `swarm/<run>/interactive-*` branch. `harvest.sh` merges those
 branches explicitly alongside `agent-work`.
 
+Embedders should use `control.sh`, not internal script paths. Its
+`claude-swarm.control/v1` JSON operations report capabilities, paths, and
+containers; lifecycle operations delegate to the engine version that owns the
+control file. Recursive submodules and their actual Git directories are
+discovered at runtime, so moving a gitlink does not require an embedder patch.
+
+The runtime defaults to `$XDG_STATE_HOME/claude-swarm/<project>` (or
+`$HOME/.local/state/claude-swarm/<project>`), but an embedder can set an
+absolute `CLAUDE_SWARM_RUNTIME_DIR` (the local dashboard uses persistent
+per-slot state). Existing top-level `/tmp` state is migrated only after
+same-owner, non-symlink, unlocked, collision-free validation.
+
 ## Quick start
 
 ```bash
 # Create a swarmfile and launch numbered agents.
 SWARM_CONFIG=swarm.json ./launch.sh start --dashboard
+
+# Stable machine interface for an embedding tool.
+./control.sh capabilities
+./control.sh paths
 
 # Later, after agents are running or have exited:
 SWARM_CONFIG=swarm.json ./launch.sh wait

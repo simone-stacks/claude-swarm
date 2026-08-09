@@ -14,6 +14,7 @@ Orchestrate coding agents in Docker containers.
 Default command is 'start' when none is specified.
 
 Commands:
+  validate             Validate swarmfile, prompts, drivers, and auth.
   start [OPTIONS]      Build image, create bare repo, launch agents.
   stop                 Stop all running agent containers.
   logs N               Tail logs for agent N (default: 1).
@@ -56,10 +57,15 @@ source "$SWARM_DIR/lib/project.sh"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PROJECT_RAW="$(basename "$REPO_ROOT")"
 PROJECT="$(swarm_project_id "$PROJECT_RAW")"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
 SWARM_RUN_HASH="$(git -C "$REPO_ROOT" rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")"
 SWARM_RUN_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
 SWARM_RUN_CONTEXT="${PROJECT_RAW}@${SWARM_RUN_HASH} (${SWARM_RUN_BRANCH})"
-BARE_REPO="/tmp/${PROJECT}-upstream.git"
+BARE_REPO="$RUNTIME_DIR/upstream.git"
+MIRROR_DIR="$RUNTIME_DIR/mirrors"
+TARGET_MIRROR_DIR="$RUNTIME_DIR/target.git"
+TARGET_BASE_MIRROR_DIR="$RUNTIME_DIR/target-base.git"
+STATE_FILE="$RUNTIME_DIR/swarm-state.json"
 IMAGE_NAME="${PROJECT}-agent"
 
 # Expand a single $VAR reference from the host environment.
@@ -75,19 +81,20 @@ expand_env_ref() {
     fi
 }
 
-# Docker containers may create files owned by a different UID inside
-# bind-mounted host directories.  Plain rm -rf fails without root.
-# Use a throwaway Alpine container (Docker is already required) so
-# we never need sudo/su -c.
-rm_docker_dir() {
-    local dir="$1"
-    [ -d "$dir" ] || return 0
-    local parent base
-    parent="$(dirname "$dir")"
-    base="$(basename "$dir")"
-    docker run --rm -v "${parent}:${parent}" alpine \
-        rm -rf "${parent}/${base}" 2>/dev/null \
-        || rm -rf "$dir" 2>/dev/null || true
+# Remove only an explicitly named child of the verified owner-only runtime.
+safe_runtime_remove() {
+    local path="$1" parent runtime_real
+    parent=$(cd "$(dirname "$path")" && pwd -P)
+    runtime_real=$(cd "$RUNTIME_DIR" && pwd -P)
+    [ "$parent" = "$runtime_real" ] || {
+        echo "ERROR: refusing removal outside runtime: $path" >&2
+        return 1
+    }
+    [ ! -L "$path" ] || {
+        echo "ERROR: refusing symlink in runtime: $path" >&2
+        return 1
+    }
+    rm -rf -- "$path"
 }
 
 # Compute the comma-separated SWARM_AGENTS build-arg from a config:
@@ -105,7 +112,10 @@ compute_swarm_agents() {
         out="${out:+${out},}${drv}"
     done < <(jq -r '.agents[]? | (.driver // "")' "$cfg")
     local pp_drv
-    pp_drv=$(jq -r '.post_process.driver // .driver // "claude-code"' "$cfg")
+    pp_drv=$(jq -r '
+        if .post_process == null then ""
+        else (.post_process.driver // .driver // "claude-code")
+        end' "$cfg")
     if [ -n "$pp_drv" ] && [[ "$seen" != *" $pp_drv "* ]]; then
         out="${out:+${out},}${pp_drv}"
     fi
@@ -121,35 +131,96 @@ compute_swarm_agents() {
 # produces exit-127 on first session -- see harness's `agent exited with code
 # 127` retry path).
 build_image() {
-    local swarm_agents cc_version codex_version kimi_version qwen_version
+    local swarm_agents cc_version codex_version gemini_version kimi_version qwen_version
+    # shellcheck source=versions.env
+    source "$SWARM_DIR/versions.env"
     swarm_agents=$(compute_swarm_agents "$CONFIG_FILE")
-    cc_version=$(jq -r '.claude_code_version // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    codex_version=$(jq -r '.codex_cli_version // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    kimi_version=$(jq -r '.kimi_cli_version // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    qwen_version=$(jq -r '.qwen_cli_version // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    cc_version=$(jq -r --arg d "$CLAUDE_CODE_VERSION" '.claude_code_version // $d' "$CONFIG_FILE")
+    codex_version=$(jq -r --arg d "$CODEX_CLI_VERSION" '.codex_cli_version // $d' "$CONFIG_FILE")
+    gemini_version=$(jq -r --arg d "$GEMINI_CLI_VERSION" '.gemini_cli_version // $d' "$CONFIG_FILE")
+    kimi_version=$(jq -r --arg d "$KIMI_CLI_VERSION" '.kimi_cli_version // $d' "$CONFIG_FILE")
+    qwen_version=$(jq -r --arg d "$QWEN_CLI_VERSION" '.qwen_cli_version // $d' "$CONFIG_FILE")
     echo "--- Building agent image (agents: ${swarm_agents}) ---"
     docker build -t "$IMAGE_NAME" \
+        --build-arg "DEBIAN_IMAGE=${DEBIAN_IMAGE}" \
         --build-arg "SWARM_AGENTS=${swarm_agents}" \
-        ${cc_version:+--build-arg "CLAUDE_CODE_VERSION=${cc_version}"} \
-        ${codex_version:+--build-arg "CODEX_CLI_VERSION=${codex_version}"} \
-        ${kimi_version:+--build-arg "KIMI_CLI_VERSION=${kimi_version}"} \
-        ${qwen_version:+--build-arg "QWEN_CLI_VERSION=${qwen_version}"} \
+        --build-arg "NODE_VERSION=${NODE_VERSION}" \
+        --build-arg "NODE_SHA256_AMD64=${NODE_SHA256_AMD64}" \
+        --build-arg "NODE_SHA256_ARM64=${NODE_SHA256_ARM64}" \
+        --build-arg "CLAUDE_CODE_VERSION=${cc_version}" \
+        --build-arg "CLAUDE_INSTALL_SHA256=${CLAUDE_INSTALL_SHA256}" \
+        --build-arg "CODEX_CLI_VERSION=${codex_version}" \
+        --build-arg "GEMINI_CLI_VERSION=${gemini_version}" \
+        --build-arg "KIMI_CLI_VERSION=${kimi_version}" \
+        --build-arg "KIMI_INSTALL_SHA256=${KIMI_INSTALL_SHA256}" \
+        --build-arg "QWEN_CLI_VERSION=${qwen_version}" \
+        --build-arg "QWEN_INSTALL_SHA256=${QWEN_INSTALL_SHA256}" \
         -f "$SWARM_DIR/Dockerfile" "$SWARM_DIR"
 }
 
+assert_existing_bare_contained() {
+    [ -e "$BARE_REPO" ] || return 0
+    [ ! -L "$BARE_REPO" ] && [ -d "$BARE_REPO" ] \
+        && git -C "$BARE_REPO" rev-parse --git-dir >/dev/null 2>&1 || {
+        echo "ERROR: existing bare path is not a readable repository." >&2
+        return 1
+    }
+
+    local ref tip
+    while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        tip=$(git -C "$BARE_REPO" rev-parse --verify "${ref}^{commit}") \
+            || return 1
+        if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$tip" HEAD \
+                2>/dev/null; then
+            echo "ERROR: existing bare repository has an unharvested ref:" \
+                >&2
+            echo "       $ref (${tip:0:12}); harvest or rescue it first." >&2
+            return 1
+        fi
+    done < <(git -C "$BARE_REPO" for-each-ref --format='%(refname)' \
+        refs/heads/agent-work refs/heads/swarm)
+}
+
 create_bare_repo() {
-    local label="${1:-bare repo}"
+    local label="${1:-bare repo}" new old had_old=0
+    assert_existing_bare_contained || return 1
     echo "--- Creating ${label} ---"
-    rm_docker_dir "$BARE_REPO"
+    new="$RUNTIME_DIR/.upstream.new.$$"
+    old="$RUNTIME_DIR/.upstream.previous.$$"
+    [ ! -e "$new" ] && [ ! -e "$old" ] || {
+        echo "ERROR: bare-repo transaction path already exists." >&2
+        return 1
+    }
     # Local clones hardlink packed objects by default. The bare repo is mounted
     # through Docker Desktop while the source stays on the host. Keep its
     # object storage independent so receive-pack does not depend on inodes
     # shared across the bind-mount boundary.
-    git clone --bare --no-hardlinks "$REPO_ROOT" "$BARE_REPO"
-    git -C "$BARE_REPO" branch agent-work HEAD 2>/dev/null || true
-    git -C "$BARE_REPO" symbolic-ref HEAD refs/heads/agent-work
-    git -C "$BARE_REPO" config core.sharedRepository world
-    chmod -R a+rwX "$BARE_REPO"
+    git clone --bare --no-hardlinks "$REPO_ROOT" "$new"
+    git -C "$new" branch agent-work HEAD 2>/dev/null || true
+    git -C "$new" symbolic-ref HEAD refs/heads/agent-work
+    git -C "$new" config core.sharedRepository false
+    chmod -R u+rwX,go-rwx "$new"
+    git -C "$new" fsck --no-dangling >/dev/null || {
+        safe_runtime_remove "$new"
+        echo "ERROR: new bare repository failed fsck." >&2
+        return 1
+    }
+    if [ -e "$BARE_REPO" ]; then
+        [ ! -L "$BARE_REPO" ] && [ -d "$BARE_REPO" ] || {
+            safe_runtime_remove "$new"
+            echo "ERROR: existing bare path is not a directory." >&2
+            return 1
+        }
+        mv "$BARE_REPO" "$old"
+        had_old=1
+    fi
+    if ! mv "$new" "$BARE_REPO"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$BARE_REPO"
+        safe_runtime_remove "$new" 2>/dev/null || true
+        return 1
+    fi
+    [ "$had_old" -eq 0 ] || safe_runtime_remove "$old"
 }
 
 ensure_bare_repo_for_interactive() {
@@ -164,48 +235,179 @@ ensure_bare_repo_for_interactive() {
     local_head=$(git rev-parse HEAD 2>/dev/null || true)
     if [ -n "$bare_head" ] && [ "$bare_head" != "$local_head" ] \
             && git merge-base --is-ancestor "$bare_head" HEAD 2>/dev/null; then
-        echo "ERROR: ${BARE_REPO} is stale (agent-work" \
-             "${bare_head:0:7} behind local HEAD" \
-             "${local_head:0:7})." >&2
-        echo "       Remove it to start from current HEAD:" >&2
-        echo "       rm -rf ${BARE_REPO}" >&2
-        exit 1
+        echo "--- Refreshing contained bare repo from current HEAD ---"
+        create_bare_repo "bare repo for interactive session"
+        return
     fi
 }
 
 mirror_submodules() {
-    cd "$REPO_ROOT"
-    git submodule foreach --quiet 'echo "$name|$toplevel/.git/modules/$sm_path"' | \
-    while IFS='|' read -r name gitdir; do
-        local safe_name mirror
-        safe_name="${name//\//_}"
-        mirror="/tmp/${PROJECT}-mirror-${safe_name}.git"
-        rm_docker_dir "$mirror"
-        echo "--- Mirroring submodule: ${name} ---"
-        git clone --bare "$gitdir" "$mirror"
-        chmod -R a+rwX "$mirror"
-    done
+    local status new old had_old=0 idx=0 display gitdir mirror
+    status=$(git -C "$REPO_ROOT" submodule status --recursive) || return 1
+    if printf '%s\n' "$status" | grep -qE '^[+-U]'; then
+        echo "ERROR: every recursive submodule must be initialized at its pinned gitlink." >&2
+        printf '%s\n' "$status" >&2
+        return 1
+    fi
+    new="$RUNTIME_DIR/.mirrors.new.$$"
+    old="$RUNTIME_DIR/.mirrors.previous.$$"
+    [ ! -e "$new" ] && [ ! -e "$old" ] || {
+        echo "ERROR: mirror transaction path already exists." >&2
+        return 1
+    }
+    mkdir -m 700 "$new" "$new/repos"
+    : > "$new/manifest.tsv"
+    while IFS=$'\t' read -r display gitdir; do
+        [ -n "$display" ] || continue
+        case "$display" in *$'\n'*|*$'\t'*)
+            echo "ERROR: unsupported control character in submodule path." >&2
+            safe_runtime_remove "$new"
+            return 1;;
+        esac
+        idx=$((idx + 1))
+        mirror="repos/repo-${idx}.git"
+        echo "--- Mirroring submodule: ${display} ---"
+        git clone --bare --no-hardlinks "$gitdir" "$new/$mirror"
+        git -C "$new/$mirror" fsck --no-dangling >/dev/null || {
+            safe_runtime_remove "$new"
+            echo "ERROR: mirror failed fsck: ${display}" >&2
+            return 1
+        }
+        chmod -R u+rwX,go-rwx "$new/$mirror"
+        printf '%s\t%s\n' "$display" "$mirror" >> "$new/manifest.tsv"
+    done < <(git -C "$REPO_ROOT" submodule foreach --quiet --recursive \
+        'printf "%s\t" "$displaypath"; git rev-parse --absolute-git-dir')
+    chmod 600 "$new/manifest.tsv"
+    if [ -e "$MIRROR_DIR" ]; then
+        [ ! -L "$MIRROR_DIR" ] && [ -d "$MIRROR_DIR" ] || {
+            safe_runtime_remove "$new"
+            echo "ERROR: existing mirror path is not a directory." >&2
+            return 1
+        }
+        mv "$MIRROR_DIR" "$old"
+        had_old=1
+    fi
+    if ! mv "$new" "$MIRROR_DIR"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$MIRROR_DIR"
+        safe_runtime_remove "$new" 2>/dev/null || true
+        return 1
+    fi
+    [ "$had_old" -eq 0 ] || safe_runtime_remove "$old"
 }
 
-write_mirror_volume_file() {
-    local output_file="$1"
-    cd "$REPO_ROOT"
-    git submodule foreach --quiet 'echo "$name"' 2>/dev/null | \
-    while read -r name; do
-        local safe_name mirror
-        safe_name="${name//\//_}"
-        mirror="/tmp/${PROJECT}-mirror-${safe_name}.git"
-        [ -d "$mirror" ] || continue
-        echo "-v ${mirror}:/mirrors/${name}:ro"
-    done > "$output_file"
+load_mirror_args() {
+    MIRROR_ARGS=()
+    if [ -f "$MIRROR_DIR/manifest.tsv" ]; then
+        MIRROR_ARGS=(-v "${MIRROR_DIR}:/mirrors:ro")
+    fi
 }
 
-read_volume_file() {
-    local input_file="$1"
-    while read -r line; do
-        # shellcheck disable=SC2206
-        [ -n "$line" ] && MIRROR_ARGS+=($line)
-    done < "$input_file"
+clone_repo_authenticated() {
+    local source="$1" destination="$2" askpass="" rc=0
+    if [ -n "${SWARM_READER_TOKEN:-}" ] && [[ "$source" == https://* ]]; then
+        askpass=$(mktemp "$RUNTIME_DIR/reader-askpass.XXXXXX")
+        cat > "$askpass" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *Password*) printf '%s\n' "${SWARM_READER_TOKEN:-}" ;;
+  *) printf '\n' ;;
+esac
+EOF
+        chmod 700 "$askpass"
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" \
+            git clone --mirror --no-hardlinks -- "$source" "$destination" \
+            || rc=$?
+        rm -f "$askpass"
+        return "$rc"
+    fi
+    GIT_TERMINAL_PROMPT=0 git clone --mirror --no-hardlinks -- \
+        "$source" "$destination"
+}
+
+prepare_repo_mirror() {
+    local source="$1" revision="$2" destination="$3" label="$4"
+    local new old had_old=0 resolved
+    new="$RUNTIME_DIR/.${label}.new.$$"
+    old="$RUNTIME_DIR/.${label}.previous.$$"
+    [ ! -e "$new" ] && [ ! -e "$old" ] || {
+        echo "ERROR: ${label} mirror transaction path already exists." >&2
+        return 1
+    }
+    echo "--- Resolving ${label}: ${source} # ${revision} ---" >&2
+    if ! clone_repo_authenticated "$source" "$new"; then
+        safe_runtime_remove "$new" 2>/dev/null || true
+        echo "ERROR: cannot clone ${label} repository." >&2
+        return 1
+    fi
+    resolved=$(git -C "$new" rev-parse --verify "${revision}^{commit}" \
+        2>/dev/null) || {
+        safe_runtime_remove "$new"
+        echo "ERROR: ${label} revision does not resolve to a commit: $revision" >&2
+        return 1
+    }
+    git -C "$new" fsck --no-dangling >/dev/null || {
+        safe_runtime_remove "$new"
+        echo "ERROR: ${label} mirror failed fsck." >&2
+        return 1
+    }
+    chmod -R u+rwX,go-rwx "$new"
+    if [ -e "$destination" ]; then
+        [ ! -L "$destination" ] && [ -d "$destination" ] || {
+            safe_runtime_remove "$new"
+            echo "ERROR: existing ${label} mirror is not a directory." >&2
+            return 1
+        }
+        mv "$destination" "$old"
+        had_old=1
+    fi
+    if ! mv "$new" "$destination"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$destination"
+        safe_runtime_remove "$new" 2>/dev/null || true
+        return 1
+    fi
+    [ "$had_old" -eq 0 ] || safe_runtime_remove "$old"
+    printf '%s' "$resolved"
+}
+
+prepare_target_mirrors() {
+    TARGET_MIRROR_ARGS=()
+    if [ -z "${TARGET_REPO:-}" ] && [ -z "${TARGET_REV:-}" ]; then
+        return 0
+    fi
+    [ -n "${TARGET_REPO:-}" ] && [ -n "${TARGET_REV:-}" ] || {
+        echo "ERROR: TARGET_REPO and TARGET_REV are required." >&2
+        return 1
+    }
+    TARGET_REV=$(prepare_repo_mirror "$TARGET_REPO" "$TARGET_REV" \
+        "$TARGET_MIRROR_DIR" target)
+    export TARGET_REV
+    TARGET_MIRROR_ARGS=(-v "${TARGET_MIRROR_DIR}:/target-upstream:ro" \
+        -e "SWARM_TARGET_MIRROR=/target-upstream" \
+        -e "TARGET_REPO=${TARGET_REPO}" \
+        -e "TARGET_REV=${TARGET_REV}")
+
+    if [ -n "${TARGET_REV_BASE:-}" ] \
+            && [ "${TARGET_REV_BASE_REPO:-$TARGET_REPO}" != "$TARGET_REPO" ]; then
+        TARGET_REV_BASE=$(prepare_repo_mirror "$TARGET_REV_BASE_REPO" \
+            "$TARGET_REV_BASE" "$TARGET_BASE_MIRROR_DIR" target-base)
+        export TARGET_REV_BASE
+        TARGET_MIRROR_ARGS+=(
+            -v "${TARGET_BASE_MIRROR_DIR}:/target-base-upstream:ro"
+            -e "SWARM_TARGET_BASE_MIRROR=/target-base-upstream")
+    elif [ -n "${TARGET_REV_BASE:-}" ]; then
+        TARGET_REV_BASE=$(git -C "$TARGET_MIRROR_DIR" rev-parse --verify \
+            "${TARGET_REV_BASE}^{commit}") || {
+            echo "ERROR: target base revision does not resolve to a commit." \
+                >&2
+            return 1
+        }
+        export TARGET_REV_BASE
+    fi
+    TARGET_MIRROR_ARGS+=(
+        -e "TARGET_REV_BASE=${TARGET_REV_BASE:-}"
+        -e "TARGET_REV_BASE_REPO=${TARGET_REV_BASE_REPO:-$TARGET_REPO}")
+    echo "--- Target snapshot: ${TARGET_REV} ---"
 }
 
 available_drivers() {
@@ -255,6 +457,36 @@ while IFS= read -r _da; do
     [ -n "$_da" ] && DOCKER_EXTRA_ARGS+=("$_da")
 done < <(jq -r '.docker_args[]?' "$CONFIG_FILE" 2>/dev/null)
 
+# Target provenance and the reader token are owned by the host-side snapshot.
+# Never allow a swarmfile to override them in Docker Config.Env. Preserve every
+# unrelated operator-supplied Docker argument.
+reserved_target_env() {
+    case "${1%%=*}" in
+        SWARM_READER_TOKEN|SWARM_TARGET_MIRROR|SWARM_TARGET_BASE_MIRROR|\
+        TARGET_REPO|TARGET_REV|TARGET_REV_BASE|TARGET_REV_BASE_REPO) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+FILTERED_DOCKER_ARGS=()
+for ((i = 0; i < ${#DOCKER_EXTRA_ARGS[@]}; i++)); do
+    case "${DOCKER_EXTRA_ARGS[$i]}" in
+        -e|--env)
+            if reserved_target_env \
+                    "${DOCKER_EXTRA_ARGS[$((i + 1))]:-}"; then
+                i=$((i + 1))
+                continue
+            fi
+            ;;
+        -e*|--env=*)
+            inline_env="${DOCKER_EXTRA_ARGS[$i]#-e}"
+            inline_env="${inline_env#--env=}"
+            reserved_target_env "$inline_env" && continue
+            ;;
+    esac
+    FILTERED_DOCKER_ARGS+=("${DOCKER_EXTRA_ARGS[$i]}")
+done
+DOCKER_EXTRA_ARGS=("${FILTERED_DOCKER_ARGS[@]}")
+
 parse_start_args() {
     OPEN_DASHBOARD=false
     while [ $# -gt 0 ]; do
@@ -268,6 +500,68 @@ parse_start_args() {
                 exit 1 ;;
         esac
     done
+}
+
+validate_config() {
+    local all_groups_have_prompt profile encoded index=0 label driver
+    local api_key auth_token auth base_url auth_output auth_label prompt
+    [ "$NUM_AGENTS" -gt 0 ] || {
+        echo "ERROR: swarmfile must configure at least one agent." >&2
+        return 1
+    }
+
+    all_groups_have_prompt=$(jq \
+        '[.agents[] | has("prompt") and (.prompt | length > 0)] | all' \
+        "$CONFIG_FILE")
+    if [ -z "$SWARM_PROMPT" ] && [ "$all_groups_have_prompt" != true ]; then
+        echo "ERROR: 'prompt' is missing in ${CONFIG_FILE}." >&2
+        return 1
+    fi
+    if [ -n "$SWARM_PROMPT" ] && [ ! -f "$REPO_ROOT/$SWARM_PROMPT" ]; then
+        echo "ERROR: prompt '${SWARM_PROMPT}' not found." >&2
+        return 1
+    fi
+
+    while IFS= read -r encoded; do
+        [ -n "$encoded" ] || continue
+        index=$((index + 1))
+        profile=$(printf '%s' "$encoded" | base64 -d) || return 1
+        label=$(jq -r --argjson i "$index" \
+            '.name // ("profile-" + ($i | tostring))' <<< "$profile")
+        driver=$(jq -r --arg default "$SWARM_DRIVER_DEFAULT" \
+            '.driver // $default' <<< "$profile")
+        [ -f "$SWARM_DIR/lib/drivers/${driver}.sh" ] || {
+            echo "ERROR: unknown driver '${driver}' in ${label}." >&2
+            echo "Available drivers: $(available_drivers)" >&2
+            return 1
+        }
+        prompt=$(jq -r '.prompt // empty' <<< "$profile")
+        if [ -n "$prompt" ] && [ ! -f "$REPO_ROOT/$prompt" ]; then
+            echo "ERROR: prompt '${prompt}' for ${label} not found." >&2
+            return 1
+        fi
+        api_key=$(expand_env_ref "$(jq -r '.api_key // empty' <<< "$profile")")
+        auth_token=$(expand_env_ref "$(jq -r '.auth_token // empty' <<< "$profile")")
+        auth=$(jq -r '.auth // empty' <<< "$profile")
+        base_url=$(jq -r '.base_url // empty' <<< "$profile")
+        # shellcheck source=lib/drivers/claude-code.sh
+        source "$SWARM_DIR/lib/drivers/${driver}.sh"
+        auth_output=$(agent_docker_auth "$api_key" "$auth_token" \
+            "$auth" "$base_url") || return 1
+        auth_label=$(sed -n 's/^SWARM_AUTH_MODE=//p' \
+            <<< "$auth_output" | tail -1)
+        if [ "$driver" != fake ] && [ -z "$auth_label" ]; then
+            echo "ERROR: no usable credentials for ${label} (${driver}/${auth:-default})." >&2
+            return 1
+        fi
+    done < <(jq -r '
+        ([.agents[]?] + ([.post_process] | map(select(. != null))))[]
+        | @base64' "$CONFIG_FILE")
+}
+
+cmd_validate() {
+    validate_config
+    echo "Swarm configuration and credentials validated: $CONFIG_FILE"
 }
 
 print_interactive_profiles() {
@@ -391,7 +685,7 @@ HELP
     done
 
     local profile_file
-    profile_file="/tmp/${PROJECT}-interactive-profile-$$.json"
+    profile_file=$(mktemp "$RUNTIME_DIR/interactive-profile.XXXXXX.json")
     select_interactive_profile "$selector" "$selector_index" "$profile_file"
 
     local profile_name profile_label safe_profile short_id branch name
@@ -450,15 +744,13 @@ HELP
         exit 1
     fi
 
+    prepare_target_mirrors
     ensure_bare_repo_for_interactive
     mirror_submodules
     build_image
 
-    local vols_file="/tmp/${PROJECT}-interactive-vols.txt"
-    write_mirror_volume_file "$vols_file"
-    MIRROR_ARGS=()
-    read_volume_file "$vols_file"
-    rm -f "$vols_file" "$profile_file"
+    load_mirror_args
+    rm -f "$profile_file"
 
     local EXTRA_ENV=()
     while IFS= read -r _ae; do
@@ -472,14 +764,22 @@ HELP
         done < <(agent_docker_env "$agent_effort")
     fi
 
-    docker rm -f "$name" 2>/dev/null || true
+    if docker inspect "$name" >/dev/null 2>&1; then
+        echo "ERROR: container $name already exists; rescue and remove it explicitly." >&2
+        exit 1
+    fi
 
     echo "--- Starting interactive ${profile_label} (${agent_model}) ---"
     echo "Branch: ${branch}"
     docker run -it \
         --name "$name" \
+        --label "org.claude-swarm.managed=true" \
+        --label "org.claude-swarm.project=${PROJECT}" \
+        --label "org.claude-swarm.engagement=${ENGAGEMENT_ID:-interactive}" \
+        --label "org.claude-swarm.role=interactive" \
         -v "${BARE_REPO}:/upstream:rw" \
         "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
+        "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
         "${SIGNING_KEY_ARGS[@]+"${SIGNING_KEY_ARGS[@]}"}" \
         "${DOCKER_EXTRA_ARGS[@]+"${DOCKER_EXTRA_ARGS[@]}"}" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -506,68 +806,26 @@ HELP
 }
 
 cmd_start() {
-    # Top-level prompt is optional when every agent group defines its own.
-    local all_groups_have_prompt
-    all_groups_have_prompt=$(jq \
-        '[.agents[] | has("prompt") and (.prompt | length > 0)] | all' \
-        "$CONFIG_FILE")
+    validate_config
 
-    if [ -z "$SWARM_PROMPT" ] && [ "$all_groups_have_prompt" != "true" ]; then
-        echo "ERROR: 'prompt' is missing in ${CONFIG_FILE} (required when not every agent group specifies its own)." >&2
+    local existing_containers
+    existing_containers=$(docker ps -a \
+        --filter "label=org.claude-swarm.project=${PROJECT}" \
+        --format '{{.Names}}' 2>/dev/null || true)
+    # Backward-compatible detection protects containers made before labels
+    # existed as well. No start path is allowed to erase forensic state.
+    if [ -z "$existing_containers" ]; then
+        existing_containers=$(docker ps -a \
+            --filter "name=^${IMAGE_NAME}-" --format '{{.Names}}' \
+            2>/dev/null || true)
+    fi
+    if [ -n "$existing_containers" ]; then
+        echo "ERROR: existing project containers must be rescued and removed explicitly:" >&2
+        printf '%s\n' "$existing_containers" | sed 's/^/  /' >&2
         exit 1
     fi
 
-    if [ -n "$SWARM_PROMPT" ] && [ ! -f "$REPO_ROOT/$SWARM_PROMPT" ]; then
-        echo "ERROR: prompt '${SWARM_PROMPT}' not found." >&2
-        exit 1
-    fi
-
-    # Validate per-group prompt overrides.
-    local group_prompts
-    group_prompts=$(jq -r '[.agents[].prompt // empty] | unique[]' \
-        "$CONFIG_FILE" 2>/dev/null || true)
-    while IFS= read -r gp; do
-        [ -z "$gp" ] && continue
-        if [ ! -f "$REPO_ROOT/$gp" ]; then
-            echo "ERROR: per-group prompt ${gp} not found." >&2
-            exit 1
-        fi
-    done <<< "$group_prompts"
-
-    # Refuse to overwrite a bare repo that diverges from local HEAD.
-    # Distinguish two directions so the message leads with the remediation
-    # that actually works.  The `--is-ancestor` check runs in the local
-    # repo, not in the bare: in the "local ahead" case LOCAL_HEAD is not
-    # in the bare's object db, so running the check in the bare would
-    # always return non-zero and collapse the stale case into the
-    # unharvested branch.  Running in local works across all three cases
-    # because bare's objects are either (a) still in local (inherited at
-    # clone time, so ancestry is resolvable -> stale) or (b) only in
-    # bare (agent-produced post-clone, so BARE_HEAD errors out here ->
-    # unharvested, which also catches the truly-divergent case).
-    if [ -d "$BARE_REPO" ]; then
-        BARE_HEAD=$(git -C "$BARE_REPO" rev-parse --verify --quiet refs/heads/agent-work 2>/dev/null || true)
-        LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
-        if [ -n "$BARE_HEAD" ] && [ "$BARE_HEAD" != "$LOCAL_HEAD" ]; then
-            if git merge-base --is-ancestor "$BARE_HEAD" HEAD 2>/dev/null; then
-                echo "ERROR: ${BARE_REPO} is stale (agent-work" \
-                     "${BARE_HEAD:0:7} behind local HEAD" \
-                     "${LOCAL_HEAD:0:7})." >&2
-                echo "       Remove it to start a fresh run from" \
-                     "current HEAD:" >&2
-                echo "       rm -rf ${BARE_REPO}" >&2
-            else
-                echo "ERROR: ${BARE_REPO} has unharvested agent" \
-                     "commits (agent-work ${BARE_HEAD:0:7} vs local" \
-                     "HEAD ${LOCAL_HEAD:0:7})." >&2
-                echo "       Run harvest.sh first, or if you've" \
-                     "already integrated those commits:" >&2
-                echo "       rm -rf ${BARE_REPO}" >&2
-            fi
-            exit 1
-        fi
-    fi
-
+    prepare_target_mirrors
     create_bare_repo "bare repo"
 
     # Mirror each submodule so containers can init without network.
@@ -575,43 +833,25 @@ cmd_start() {
 
     # Build per-agent config (model|base_url|api_key|effort|auth|context|prompt|auth_token|tag|driver per line).
     # Uses pipe delimiter because bash IFS=$'\t' collapses consecutive tabs.
-    AGENTS_CFG="/tmp/${PROJECT}-agents.cfg"
+    AGENTS_CFG="$RUNTIME_DIR/agents.cfg"
     jq -r '.tag as $dt | .driver as $dd |
         .agents[] | range(.count // 0) as $i |
         [.model, (.base_url // ""), (.api_key // ""), (.effort // ""), (.auth // ""), (.context // ""), (.prompt // ""), (.auth_token // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' \
         "$CONFIG_FILE" > "$AGENTS_CFG"
 
-    # Preflight: validate all referenced drivers exist before
-    # spending time on image build and container startup.
-    local _bad_drivers="" _checked_drivers=" "
-    while IFS='|' read -r _ _ _ _ _ _ _ _ _ _drv; do
-        _drv="${_drv:-${SWARM_DRIVER_DEFAULT}}"
-        [[ "$_checked_drivers" == *" $_drv "* ]] && continue
-        _checked_drivers+="$_drv "
-        if [ ! -f "$SWARM_DIR/lib/drivers/${_drv}.sh" ]; then
-            _bad_drivers+="  - ${_drv}\n"
-        fi
-    done < "$AGENTS_CFG"
-    if [ -n "$_bad_drivers" ]; then
-        printf "ERROR: unknown driver(s):\n%b" "$_bad_drivers" >&2
-        echo "Available drivers: $(available_drivers)" >&2
-        exit 1
-    fi
-
     build_image
 
     # Build mirror volume args from discovered submodules.
-    write_mirror_volume_file "/tmp/${PROJECT}-mirror-vols.txt"
-
-    # Read mirror volume mounts (shared across all containers).
-    MIRROR_ARGS=()
-    read_volume_file "/tmp/${PROJECT}-mirror-vols.txt"
+    load_mirror_args
 
     AGENT_IDX=0
     while IFS='|' read -r agent_model agent_base_url agent_api_key agent_effort agent_auth agent_context agent_prompt agent_auth_token agent_tag agent_driver; do
         AGENT_IDX=$((AGENT_IDX + 1))
         NAME="${IMAGE_NAME}-${AGENT_IDX}"
-        docker rm -f "$NAME" 2>/dev/null || true
+        if docker inspect "$NAME" >/dev/null 2>&1; then
+            echo "ERROR: container $NAME already exists; rescue and remove it explicitly." >&2
+            exit 1
+        fi
         agent_api_key="$(expand_env_ref "$agent_api_key")"
         agent_auth_token="$(expand_env_ref "$agent_auth_token")"
         agent_tag="$(expand_env_ref "$agent_tag")"
@@ -653,8 +893,14 @@ cmd_start() {
 
         docker run -d \
             --name "$NAME" \
+            --label "org.claude-swarm.managed=true" \
+            --label "org.claude-swarm.project=${PROJECT}" \
+            --label "org.claude-swarm.engagement=${ENGAGEMENT_ID:-unknown}" \
+            --label "org.claude-swarm.role=agent" \
+            --label "org.claude-swarm.agent-index=${AGENT_IDX}" \
             -v "${BARE_REPO}:/upstream:rw" \
             "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
+            "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
             "${SIGNING_KEY_ARGS[@]+"${SIGNING_KEY_ARGS[@]}"}" \
             "${DOCKER_EXTRA_ARGS[@]+"${DOCKER_EXTRA_ARGS[@]}"}" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -684,7 +930,7 @@ cmd_start() {
             "$IMAGE_NAME"
     done < "$AGENTS_CFG"
 
-    rm -f "/tmp/${PROJECT}-mirror-vols.txt" "/tmp/${PROJECT}-agents.cfg"
+    rm -f "$AGENTS_CFG"
 
     # Write state file so a standalone dashboard can pick up config.
     local state_model_summary state_config_label
@@ -703,13 +949,22 @@ cmd_start() {
     state_config_label=$(basename "$CONFIG_FILE")
     local config_title
     config_title=$(jq -r '.title // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    cat > "/tmp/${PROJECT}-swarm.env" <<ENVEOF
-SWARM_TITLE="${SWARM_TITLE:-${config_title}}"
-SWARM_CONFIG="${CONFIG_FILE}"
-SWARM_NUM_AGENTS="${NUM_AGENTS}"
-SWARM_MODEL_SUMMARY="${state_model_summary}"
-SWARM_CONFIG_LABEL="${state_config_label}"
-ENVEOF
+    local state_tmp
+    state_tmp=$(mktemp "$RUNTIME_DIR/swarm-state.XXXXXX.json")
+    jq -n \
+        --arg title "${SWARM_TITLE:-${config_title}}" \
+        --arg config "$CONFIG_FILE" \
+        --argjson num_agents "$NUM_AGENTS" \
+        --arg model_summary "$state_model_summary" \
+        --arg config_label "$state_config_label" \
+        --arg target_repo "${TARGET_REPO:-}" \
+        --arg target_rev "${TARGET_REV:-}" \
+        '{schema:"claude-swarm.state/v1", title:$title, config:$config,
+          num_agents:$num_agents, model_summary:$model_summary,
+          config_label:$config_label, target_repo:$target_repo,
+          target_rev:$target_rev}' > "$state_tmp"
+    chmod 600 "$state_tmp"
+    mv "$state_tmp" "$STATE_FILE"
 
     echo ""
     echo "--- ${NUM_AGENTS} agents launched ---"
@@ -751,7 +1006,8 @@ cmd_stop() {
     docker stop -t "$stop_timeout" "$NAME" 2>/dev/null \
         && echo "  stopped ${NAME}" \
         || echo "  ${NAME} not running"
-    rm -f "/tmp/${PROJECT}-swarm.env"
+    # Preserve the last-run state for dashboards and forensics. A future start
+    # replaces it atomically after the new roster has launched.
 }
 
 cmd_logs() {
@@ -865,16 +1121,18 @@ cmd_post_process() {
         create_bare_repo "bare repo for post-process"
     fi
 
+    prepare_target_mirrors
     build_image
 
     local NAME="${IMAGE_NAME}-post"
-    docker rm -f "$NAME" 2>/dev/null || true
+    if docker inspect "$NAME" >/dev/null 2>&1; then
+        echo "ERROR: container $NAME already exists; rescue and remove it explicitly." >&2
+        return 1
+    fi
 
     # Build mirror volume args from existing mirrors.
     local MIRROR_ARGS=()
-    write_mirror_volume_file "/tmp/${PROJECT}-pp-vols.txt"
-    read_volume_file "/tmp/${PROJECT}-pp-vols.txt"
-    rm -f "/tmp/${PROJECT}-pp-vols.txt"
+    load_mirror_args
 
     # Source the driver to access agent_docker_auth / agent_docker_env.
     # shellcheck source=lib/drivers/claude-code.sh
@@ -903,8 +1161,13 @@ cmd_post_process() {
     echo "--- Starting post-processing (${pp_model}) ---"
     docker run -d \
         --name "$NAME" \
+        --label "org.claude-swarm.managed=true" \
+        --label "org.claude-swarm.project=${PROJECT}" \
+        --label "org.claude-swarm.engagement=${ENGAGEMENT_ID:-unknown}" \
+        --label "org.claude-swarm.role=post-process" \
         -v "${BARE_REPO}:/upstream:rw" \
         "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
+        "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
         "${SIGNING_KEY_ARGS[@]+"${SIGNING_KEY_ARGS[@]}"}" \
         "${DOCKER_EXTRA_ARGS[@]+"${DOCKER_EXTRA_ARGS[@]}"}" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -967,6 +1230,7 @@ cmd_post_process() {
 }
 
 case "${1:-start}" in
+    validate)      cmd_validate ;;
     start)
         shift
         parse_start_args "$@"
@@ -993,7 +1257,7 @@ case "${1:-start}" in
         cmd_interactive shell "$@"
         ;;
     *)
-        echo "Usage: $0 {start|stop|logs N|status|wait|post-process|interactive}" >&2
+        echo "Usage: $0 {validate|start|stop|logs N|status|wait|post-process|interactive}" >&2
         echo "Try '$0 --help' for more information." >&2
         exit 1
         ;;

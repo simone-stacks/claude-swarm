@@ -16,6 +16,10 @@ All configuration lives in the swarmfile (JSON).  Place a
 ## Commands
 
 ```bash
+./control.sh capabilities            # Versioned machine contract.
+./control.sh paths                   # Project/runtime paths as JSON.
+./control.sh containers              # Engine containers as JSON.
+./control.sh validate                # Config, drivers, and auth.
 ./launch.sh start [--dashboard]   # Launch numbered agents.
 ./launch.sh stop                  # Stop all agents.
 ./launch.sh status                # Show containers.
@@ -53,10 +57,19 @@ Credentials stay as env vars (not in shell history).
 | `SWARM_ACTIVITY_POLL` | `10` | Watchdog mtime-poll interval, in seconds.  Rarely needs tuning. |
 | `SWARM_WATCHDOG_GRACE` | `10` | Grace window between watchdog SIGTERM and SIGKILL.  Rarely needs tuning. |
 | `SWARM_STOP_TIMEOUT` | `60` | Seconds `./launch.sh stop` passes to `docker stop -t`, so the harness's SIGTERM trap has time to ship any in-flight local commits via `_session_end_push` before SIGKILL hits.  See [Stopping the swarm](#stopping-the-swarm). |
+| `CLAUDE_SWARM_RUNTIME_DIR` | `$XDG_STATE_HOME/claude-swarm/<project>` | Absolute owner-only runtime override for embedders. |
+| `TARGET_REPO`, `TARGET_REV` | | Optional audit target. The host resolves one private read-only mirror and passes the same commit to every container. |
+| `SWARM_READER_TOKEN` | | Host-only credential for an HTTPS target mirror; removed from Docker arguments. |
 
 Per-group credentials (`api_key`, `auth_token`, `base_url`)
 are set in the swarmfile.  Use `$VAR` references to pull
 values from the host environment without hardcoding secrets.
+
+`control.sh validate` checks every profile through the pinned driver's auth
+resolver and fails before image build if any profile cannot authenticate.
+Agent/provider credentials necessarily enter their agent container; the
+repository reader token does not. Setup runs with temporary sudo access, which
+the harness revokes before the model session starts.
 
 ## Config file fields
 
@@ -240,14 +253,19 @@ swarmfile with host env without templating:
 ```json
 {
   "setup": "scripts/setup.sh",
-  "docker_args": ["-e", "TARGET_REPO", "-e", "TARGET_REV"]
+  "docker_args": ["-e", "TARGET", "-e", "ARCHIVE_DIR"]
 }
 ```
 
 ```bash
+TARGET=demo ARCHIVE_DIR=targets/demo/archive \
 TARGET_REPO=git@github.com:org/repo.git TARGET_REV=abc123 \
     ./launch.sh start
 ```
+
+`TARGET_REPO`, the resolved target/base commits, and the read-only mirror paths
+are engine-owned. The engine injects them after filtering conflicting
+`docker_args`, so every container receives the same recorded snapshot.
 
 ### Setup hook
 
@@ -262,7 +280,8 @@ work end-to-end.
 
 After `setup.sh` returns, the harness reclaims ownership of
 `/workspace` so subsequent agent runs can modify the tree as the
-non-root `agent` user.
+non-root `agent` user. It then removes the container's passwordless
+sudo policy before starting the model session.
 
 ### Commit signing
 
@@ -685,6 +704,20 @@ ModelStudio), then set `"auth": "oauth"` in your swarm config.  The
 home dir is bind-mounted read-only; each container copies it to a
 writable location on startup.  Override the source path with
 `QWEN_HOME=/path/to/qwen-home`.
+
+### Credential boundary
+
+Provider credentials must be readable by the provider CLI and therefore by
+the same non-root agent process. They are not a security boundary against a
+malicious prompt, dependency, or audited repository, and provider network
+egress is not restricted by the engine. Use dedicated, short-lived,
+least-privilege credentials or an external egress/token broker when that
+threat is in scope.
+
+The target reader token is different: it is consumed by the host to build the
+read-only target snapshot and is filtered from Docker configuration. Setup is
+the only passwordless-sudo phase. Log collection records container state but
+never dumps `docker inspect` environments containing provider secrets.
 
 ### General rules
 

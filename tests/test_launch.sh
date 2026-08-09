@@ -1295,7 +1295,7 @@ rm -rf "$_pp_repo" "$_pp_bare"
 
 # ============================================================
 echo ""
-echo "=== 35. Bare repo is independent and world-writable after creation ==="
+echo "=== 35. Bare repo is independent and private after creation ==="
 
 # Simulate the bare-repo creation + permission fix from cmd_start.
 _wr_repo="$TMPDIR/wr-src-repo"
@@ -1312,26 +1312,26 @@ rm -rf "$_wr_bare"
 git clone --bare --no-hardlinks "$_wr_repo" "$_wr_bare" 2>/dev/null
 git -C "$_wr_bare" branch agent-work HEAD 2>/dev/null || true
 git -C "$_wr_bare" symbolic-ref HEAD refs/heads/agent-work
-git -C "$_wr_bare" config core.sharedRepository world
-chmod -R a+rwX "$_wr_bare"
+git -C "$_wr_bare" config core.sharedRepository false
+chmod -R u+rwX,go-rwx "$_wr_bare"
 
-# Verify core.sharedRepository is set to "world".
+# Verify sharing is disabled.
 _wr_shared=$(git -C "$_wr_bare" config core.sharedRepository 2>/dev/null || echo "")
-assert_eq "bare repo sharedRepository=world" "world" "$_wr_shared"
+assert_eq "bare repo sharedRepository=false" "false" "$_wr_shared"
 
-# Verify objects directory is world-writable (o+w).
+# Verify objects are inaccessible to group/other.
 _wr_obj_perms=$(stat -c '%A' "$_wr_bare/objects" 2>/dev/null \
     || stat -f '%Sp' "$_wr_bare/objects" 2>/dev/null)
-_wr_other_w=$(echo "$_wr_obj_perms" | grep -c 'w.$' || true)
-assert_eq "bare repo objects/ is world-writable" "1" "$_wr_other_w"
+_wr_other_bits=${_wr_obj_perms:7:3}
+assert_eq "bare repo objects/ has no other access" "---" "$_wr_other_bits"
 
 # Verify a different user (simulated) can create objects.
 # We can't switch UID in a unit test, but we can verify the
 # permission bits on a representative subdirectory.
 _wr_pack_perms=$(stat -c '%A' "$_wr_bare/objects/pack" 2>/dev/null \
     || stat -f '%Sp' "$_wr_bare/objects/pack" 2>/dev/null)
-_wr_pack_w=$(echo "$_wr_pack_perms" | grep -c 'w.$' || true)
-assert_eq "bare repo objects/pack/ is world-writable" "1" "$_wr_pack_w"
+_wr_pack_other=${_wr_pack_perms:7:3}
+assert_eq "bare repo objects/pack/ has no other access" "---" "$_wr_pack_other"
 
 # The source checkout and bare repo cross a Docker Desktop mount boundary in
 # production. Independent packs remove the shared-inode dependency.
@@ -1354,6 +1354,12 @@ _wr_create_body=$(awk '
 assert_eq "live create_bare_repo disables hardlinks" "1" \
     "$(printf '%s\n' "$_wr_create_body" \
         | grep -cF 'git clone --bare --no-hardlinks' || true)"
+assert_eq "live create_bare_repo disables repository sharing" "1" \
+    "$(printf '%s\n' "$_wr_create_body" \
+        | grep -cF 'config core.sharedRepository false' || true)"
+assert_eq "live create_bare_repo removes group/other access" "1" \
+    "$(printf '%s\n' "$_wr_create_body" \
+        | grep -cF 'chmod -R u+rwX,go-rwx' || true)"
 
 rm -rf "$_wr_repo" "$_wr_bare"
 
@@ -1491,8 +1497,7 @@ echo "=== 37. bare preflight: stale vs unharvested ==="
 # case -- where LOCAL_HEAD is a commit that only exists in local
 # -- resolves correctly; running the check inside the bare would
 # fail to resolve LOCAL_HEAD and collapse stale into unharvested.
-# Returns 0 when the guard would allow the run, 1 (with an ERROR
-# line on stderr) when it would refuse.
+# Returns 0 when replacement is safe, 1 when unique bare state would be lost.
 check_bare_preflight() {
     local bare="$1" local_repo="$2"
     [ -d "$bare" ] || return 0
@@ -1505,19 +1510,14 @@ check_bare_preflight() {
     [ "$bare_head" = "$local_head" ] && return 0
     if git -C "$local_repo" merge-base --is-ancestor \
             "$bare_head" HEAD 2>/dev/null; then
-        echo "ERROR: ${bare} is stale (agent-work" \
-             "${bare_head:0:7} behind local HEAD" \
-             "${local_head:0:7})." >&2
-        echo "       Remove it to start a fresh run from" \
-             "current HEAD:" >&2
-        echo "       rm -rf ${bare}" >&2
+        echo "contained agent-work ${bare_head:0:7} behind local HEAD" \
+             "${local_head:0:7}" >&2
+        return 0
     else
         echo "ERROR: ${bare} has unharvested agent commits" \
              "(agent-work ${bare_head:0:7} vs local HEAD" \
              "${local_head:0:7})." >&2
-        echo "       Run harvest.sh first, or if you've" \
-             "already integrated those commits:" >&2
-        echo "       rm -rf ${bare}" >&2
+        echo "       Run harvest.sh; divergent state is preserved." >&2
     fi
     return 1
 }
@@ -1571,7 +1571,7 @@ assert_eq "unharvested -> names short BARE_HEAD" "1" \
 assert_eq "unharvested -> names short LOCAL_HEAD" "1" \
     "$(echo "$_bp_unh_err" \
         | grep -cE "local HEAD ${_bp_B:0:7}" || true)"
-assert_eq "unharvested -> rm -rf remediation still offered" "1" \
+assert_eq "unharvested -> no destructive remediation" "0" \
     "$(echo "$_bp_unh_err" \
         | grep -cE "rm -rf ${_bp_bare}" || true)"
 if check_bare_preflight "$_bp_bare" "$_bp_local" \
@@ -1590,15 +1590,15 @@ git -C "$_bp_local" -c user.name=t -c user.email=t@t \
 _bp_D=$(git -C "$_bp_local" rev-parse HEAD)
 _bp_stale_err=$(check_bare_preflight "$_bp_bare" "$_bp_local" \
     2>&1 >/dev/null || true)
-assert_eq "stale -> 'is stale' wording" "1" \
+assert_eq "stale -> contained wording" "1" \
     "$(echo "$_bp_stale_err" \
-        | grep -cE 'is stale \(agent-work' || true)"
+        | grep -cE 'contained agent-work' || true)"
 assert_eq "stale -> 'behind local HEAD' wording" "1" \
     "$(echo "$_bp_stale_err" \
         | grep -cE 'behind local HEAD' || true)"
-assert_eq "stale -> leads with rm -rf as remediation" "1" \
+assert_eq "stale -> no destructive remediation" "0" \
     "$(echo "$_bp_stale_err" \
-        | grep -cE 'Remove it to start a fresh run' || true)"
+        | grep -cE 'rm -rf' || true)"
 assert_eq "stale -> does NOT instruct to run harvest.sh" "0" \
     "$(echo "$_bp_stale_err" \
         | grep -cE 'Run harvest\.sh first' || true)"
@@ -1614,7 +1614,7 @@ if check_bare_preflight "$_bp_bare" "$_bp_local" \
 else
     _bp_stale_rc="nonzero"
 fi
-assert_eq "stale -> non-zero exit" "nonzero" "$_bp_stale_rc"
+assert_eq "stale -> safe replacement allowed" "zero" "$_bp_stale_rc"
 
 # ------ 37.4 divergent (each side has commits the other lacks) ------
 # Give bare its own E on top of B while local still sits on D.
@@ -1625,8 +1625,7 @@ git -C "$_bp_bare" update-ref refs/heads/agent-work "$_bp_E"
 _bp_div_err=$(check_bare_preflight "$_bp_bare" "$_bp_local" \
     2>&1 >/dev/null || true)
 # Divergent collapses into the unharvested branch per spec --
-# the goal is only that the operator sees both SHAs and knows
-# rm -rf is available.
+# the goal is that both SHAs are visible while deletion remains unavailable.
 assert_eq "divergent -> falls through to unharvested wording" "1" \
     "$(echo "$_bp_div_err" \
         | grep -cE 'has unharvested agent commits' || true)"
@@ -1679,6 +1678,13 @@ source "$_EXTRACTED"
 
 assert_eq "function defined" "function" \
     "$(type -t compute_swarm_agents)"
+
+cat > "$TMPDIR/csa_fake.json" <<'EOF'
+{ "prompt": "p.md",
+  "agents": [{ "count": 1, "model": "fake", "driver": "fake" }] }
+EOF
+assert_eq "absent post-process adds no implicit driver" "fake" \
+    "$(compute_swarm_agents "$TMPDIR/csa_fake.json")"
 
 cat > "$TMPDIR/csa_default.json" <<'EOF'
 { "prompt": "p.md",

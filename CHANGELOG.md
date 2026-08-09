@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **Versioned embedding control.** `control.sh` exposes capabilities, paths,
+  project identity, container metadata, validation, and lifecycle operations.
+  Embedders no longer depend on nested script names or `/tmp` layouts.
+- **Private rescue-first runtime.** Bare repositories, recursive submodule
+  mirrors, state, and locks live below one mode-0700 runtime. Replacement is
+  transactional; every agent and interactive branch must be contained before
+  replacement, and existing containers fail closed. Local state defaults to
+  the persistent XDG state directory. Legacy top-level state is preserved by
+  validated same-owner migration.
+- **Recursive submodule mirrors.** Host discovery uses each initialized
+  submodule's actual Git directory and a path manifest. Containers initialize
+  nested submodules breadth-first from one read-only mirror tree.
+- **Immutable target snapshot.** The host resolves `TARGET_REV` once into a
+  private mirror shared read-only by every agent. Target/base provenance and
+  mirror paths are engine-owned; conflicting Docker arguments and
+  `SWARM_READER_TOKEN` are filtered. Setup-time sudo is revoked before model
+  sessions.
+- **Auditable builds and state.** Base image, Node, agent CLI versions, and
+  remote installer hashes are pinned in `versions.env`; dashboard state is
+  validated JSON rather than sourced shell text.
+- **Fail-closed auth and container metadata.** Validation delegates to each
+  driver, Kimi accepts `KIMI_MODEL_API_KEY`, and labeled agent exits are
+  machine-readable for supervisors.
+
 - **Qwen Code CLI driver.** New `qwen-cli` driver
   (`lib/drivers/qwen-cli.sh`) implements the full interface for
   Alibaba's Qwen Code CLI: headless mode with
