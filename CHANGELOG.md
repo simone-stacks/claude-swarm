@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Qwen Code CLI 0.21.11.** Bump `QWEN_CLI_VERSION` from 0.21.7 and update
+  `QWEN_INSTALL_SHA256` for the refreshed upstream installer; the previous
+  pin failed image builds after the installer URL began serving new content.
 - **Versioned embedding control.** `control.sh` exposes capabilities, paths,
   project identity, container metadata, validation, and lifecycle operations.
   Embedders no longer depend on nested script names or `/tmp` layouts.
