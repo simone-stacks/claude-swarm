@@ -523,20 +523,10 @@ if [ ! -d "/workspace/.git" ]; then
     swarm_clone_upstream /upstream /workspace hlog hlog_err
     cd /workspace
 
-    # Init only submodules whose mirrors were mounted into the
-    # container. Client submodules without mirrors keep their
-    # upstream URLs and are left for the agent to init on demand.
-    if [ -f .gitmodules ]; then
-        git config --file .gitmodules --get-regexp 'submodule\..*\.path' | \
-        while read -r key path; do
-            name="${key#submodule.}"
-            name="${name%.path}"
-            if [ -d "/mirrors/${name}" ]; then
-                git config "submodule.${name}.url" "/mirrors/${name}"
-                git submodule update --init -q -- "$path"
-            fi
-        done
-    fi
+    # The manifest maps recursive display paths to owner-only host mirrors.
+    # Initialize only mirrored submodules; unrelated client submodules retain
+    # their upstream URLs and remain untouched.
+    swarm_init_mirrored_submodules /workspace /mirrors
 
     git checkout -q agent-work
 
@@ -584,6 +574,12 @@ CTXHOOK
         # (and git reset on restart) can modify all workspace files.
         sudo chown -R "$(id -u):$(id -g)" /workspace
     fi
+
+    # Setup is the only privileged phase. Agent sessions do not retain root
+    # access after the target/toolchain bootstrap is complete.
+    unset SWARM_READER_TOKEN
+    sudo rm -f /etc/sudoers.d/agent
+    sudo -K
 
     # Write agent-specific settings (e.g. Claude Code disables its
     # Co-Authored-By trailer, attribution header, and telemetry).

@@ -62,6 +62,8 @@ SWARM_RUN_CONTEXT="${PROJECT_RAW}@${SWARM_RUN_HASH} (${SWARM_RUN_BRANCH})"
 RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
 BARE_REPO="$RUNTIME_DIR/upstream.git"
 MIRROR_DIR="$RUNTIME_DIR/mirrors"
+TARGET_MIRROR_DIR="$RUNTIME_DIR/target.git"
+TARGET_BASE_MIRROR_DIR="$RUNTIME_DIR/target-base.git"
 STATE_FILE="$RUNTIME_DIR/swarm-state.json"
 IMAGE_NAME="${PROJECT}-agent"
 
@@ -178,41 +180,172 @@ ensure_bare_repo_for_interactive() {
 }
 
 mirror_submodules() {
-    # Rebuild the mirror tree below the private runtime. The per-name layout
-    # is the contract the in-container harness consumes at /mirrors/<name>.
-    safe_runtime_remove "$MIRROR_DIR"
-    mkdir -p "$MIRROR_DIR"
-    cd "$REPO_ROOT"
-    git submodule foreach --quiet 'echo "$name|$toplevel/.git/modules/$sm_path"' | \
-    while IFS='|' read -r name gitdir; do
-        local safe_name mirror
-        safe_name="${name//\//_}"
-        mirror="$MIRROR_DIR/${safe_name}.git"
-        echo "--- Mirroring submodule: ${name} ---"
-        git clone --bare "$gitdir" "$mirror"
-        chmod -R a+rwX "$mirror"
-    done
+    local status new old had_old=0 idx=0 display gitdir mirror
+    status=$(git -C "$REPO_ROOT" submodule status --recursive) || return 1
+    if printf '%s\n' "$status" | grep -qE '^[+-U]'; then
+        echo "ERROR: every recursive submodule must be initialized at its pinned gitlink." >&2
+        printf '%s\n' "$status" >&2
+        return 1
+    fi
+    new="$RUNTIME_DIR/.mirrors.new.$$"
+    old="$RUNTIME_DIR/.mirrors.previous.$$"
+    [ ! -e "$new" ] && [ ! -e "$old" ] || {
+        echo "ERROR: mirror transaction path already exists." >&2
+        return 1
+    }
+    mkdir -m 700 "$new" "$new/repos"
+    : > "$new/manifest.tsv"
+    while IFS=$'\t' read -r display gitdir; do
+        [ -n "$display" ] || continue
+        case "$display" in *$'\n'*|*$'\t'*)
+            echo "ERROR: unsupported control character in submodule path." >&2
+            safe_runtime_remove "$new"
+            return 1;;
+        esac
+        idx=$((idx + 1))
+        mirror="repos/repo-${idx}.git"
+        echo "--- Mirroring submodule: ${display} ---"
+        git clone --bare --no-hardlinks "$gitdir" "$new/$mirror"
+        git -C "$new/$mirror" fsck --no-dangling >/dev/null || {
+            safe_runtime_remove "$new"
+            echo "ERROR: mirror failed fsck: ${display}" >&2
+            return 1
+        }
+        chmod -R u+rwX,go-rwx "$new/$mirror"
+        printf '%s\t%s\n' "$display" "$mirror" >> "$new/manifest.tsv"
+    done < <(git -C "$REPO_ROOT" submodule foreach --quiet --recursive \
+        'printf "%s\t" "$displaypath"; git rev-parse --absolute-git-dir')
+    chmod 600 "$new/manifest.tsv"
+    if [ -e "$MIRROR_DIR" ]; then
+        [ ! -L "$MIRROR_DIR" ] && [ -d "$MIRROR_DIR" ] || {
+            safe_runtime_remove "$new"
+            echo "ERROR: existing mirror path is not a directory." >&2
+            return 1
+        }
+        mv "$MIRROR_DIR" "$old"
+        had_old=1
+    fi
+    if ! mv "$new" "$MIRROR_DIR"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$MIRROR_DIR"
+        safe_runtime_remove "$new" 2>/dev/null || true
+        return 1
+    fi
+    [ "$had_old" -eq 0 ] || safe_runtime_remove "$old"
 }
 
-write_mirror_volume_file() {
-    local output_file="$1"
-    cd "$REPO_ROOT"
-    git submodule foreach --quiet 'echo "$name"' 2>/dev/null | \
-    while read -r name; do
-        local safe_name mirror
-        safe_name="${name//\//_}"
-        mirror="$MIRROR_DIR/${safe_name}.git"
-        [ -d "$mirror" ] || continue
-        echo "-v ${mirror}:/mirrors/${name}:ro"
-    done > "$output_file"
+load_mirror_args() {
+    MIRROR_ARGS=()
+    if [ -f "$MIRROR_DIR/manifest.tsv" ]; then
+        MIRROR_ARGS=(-v "${MIRROR_DIR}:/mirrors:ro")
+    fi
 }
 
-read_volume_file() {
-    local input_file="$1"
-    while read -r line; do
-        # shellcheck disable=SC2206
-        [ -n "$line" ] && MIRROR_ARGS+=($line)
-    done < "$input_file"
+clone_repo_authenticated() {
+    local source="$1" destination="$2" askpass="" rc=0
+    if [ -n "${SWARM_READER_TOKEN:-}" ] && [[ "$source" == https://* ]]; then
+        askpass=$(mktemp "$RUNTIME_DIR/reader-askpass.XXXXXX")
+        cat > "$askpass" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *Password*) printf '%s\n' "${SWARM_READER_TOKEN:-}" ;;
+  *) printf '\n' ;;
+esac
+EOF
+        chmod 700 "$askpass"
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" \
+            git clone --mirror --no-hardlinks -- "$source" "$destination" \
+            || rc=$?
+        rm -f "$askpass"
+        return "$rc"
+    fi
+    GIT_TERMINAL_PROMPT=0 git clone --mirror --no-hardlinks -- \
+        "$source" "$destination"
+}
+
+prepare_repo_mirror() {
+    local source="$1" revision="$2" destination="$3" label="$4"
+    local new old had_old=0 resolved
+    new="$RUNTIME_DIR/.${label}.new.$$"
+    old="$RUNTIME_DIR/.${label}.previous.$$"
+    [ ! -e "$new" ] && [ ! -e "$old" ] || {
+        echo "ERROR: ${label} mirror transaction path already exists." >&2
+        return 1
+    }
+    echo "--- Resolving ${label}: ${source} # ${revision} ---" >&2
+    if ! clone_repo_authenticated "$source" "$new"; then
+        safe_runtime_remove "$new" 2>/dev/null || true
+        echo "ERROR: cannot clone ${label} repository." >&2
+        return 1
+    fi
+    resolved=$(git -C "$new" rev-parse --verify "${revision}^{commit}" \
+        2>/dev/null) || {
+        safe_runtime_remove "$new"
+        echo "ERROR: ${label} revision does not resolve to a commit: $revision" >&2
+        return 1
+    }
+    git -C "$new" fsck --no-dangling >/dev/null || {
+        safe_runtime_remove "$new"
+        echo "ERROR: ${label} mirror failed fsck." >&2
+        return 1
+    }
+    chmod -R u+rwX,go-rwx "$new"
+    if [ -e "$destination" ]; then
+        [ ! -L "$destination" ] && [ -d "$destination" ] || {
+            safe_runtime_remove "$new"
+            echo "ERROR: existing ${label} mirror is not a directory." >&2
+            return 1
+        }
+        mv "$destination" "$old"
+        had_old=1
+    fi
+    if ! mv "$new" "$destination"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$destination"
+        safe_runtime_remove "$new" 2>/dev/null || true
+        return 1
+    fi
+    [ "$had_old" -eq 0 ] || safe_runtime_remove "$old"
+    printf '%s' "$resolved"
+}
+
+prepare_target_mirrors() {
+    TARGET_MIRROR_ARGS=()
+    if [ -z "${TARGET_REPO:-}" ] && [ -z "${TARGET_REV:-}" ]; then
+        return 0
+    fi
+    [ -n "${TARGET_REPO:-}" ] && [ -n "${TARGET_REV:-}" ] || {
+        echo "ERROR: TARGET_REPO and TARGET_REV are required." >&2
+        return 1
+    }
+    TARGET_REV=$(prepare_repo_mirror "$TARGET_REPO" "$TARGET_REV" \
+        "$TARGET_MIRROR_DIR" target)
+    export TARGET_REV
+    TARGET_MIRROR_ARGS=(-v "${TARGET_MIRROR_DIR}:/target-upstream:ro" \
+        -e "SWARM_TARGET_MIRROR=/target-upstream" \
+        -e "TARGET_REPO=${TARGET_REPO}" \
+        -e "TARGET_REV=${TARGET_REV}")
+
+    if [ -n "${TARGET_REV_BASE:-}" ] \
+            && [ "${TARGET_REV_BASE_REPO:-$TARGET_REPO}" != "$TARGET_REPO" ]; then
+        TARGET_REV_BASE=$(prepare_repo_mirror "$TARGET_REV_BASE_REPO" \
+            "$TARGET_REV_BASE" "$TARGET_BASE_MIRROR_DIR" target-base)
+        export TARGET_REV_BASE
+        TARGET_MIRROR_ARGS+=(
+            -v "${TARGET_BASE_MIRROR_DIR}:/target-base-upstream:ro"
+            -e "SWARM_TARGET_BASE_MIRROR=/target-base-upstream")
+    elif [ -n "${TARGET_REV_BASE:-}" ]; then
+        TARGET_REV_BASE=$(git -C "$TARGET_MIRROR_DIR" rev-parse --verify \
+            "${TARGET_REV_BASE}^{commit}") || {
+            echo "ERROR: target base revision does not resolve to a commit." \
+                >&2
+            return 1
+        }
+        export TARGET_REV_BASE
+    fi
+    TARGET_MIRROR_ARGS+=(
+        -e "TARGET_REV_BASE=${TARGET_REV_BASE:-}"
+        -e "TARGET_REV_BASE_REPO=${TARGET_REV_BASE_REPO:-$TARGET_REPO}")
+    echo "--- Target snapshot: ${TARGET_REV} ---"
 }
 
 available_drivers() {
@@ -261,6 +394,36 @@ DOCKER_EXTRA_ARGS=()
 while IFS= read -r _da; do
     [ -n "$_da" ] && DOCKER_EXTRA_ARGS+=("$_da")
 done < <(jq -r '.docker_args[]?' "$CONFIG_FILE" 2>/dev/null)
+
+# Target provenance and the reader token are owned by the host-side snapshot.
+# Never allow a swarmfile to override them in Docker Config.Env. Preserve every
+# unrelated operator-supplied Docker argument.
+reserved_target_env() {
+    case "${1%%=*}" in
+        SWARM_READER_TOKEN|SWARM_TARGET_MIRROR|SWARM_TARGET_BASE_MIRROR|\
+        TARGET_REPO|TARGET_REV|TARGET_REV_BASE|TARGET_REV_BASE_REPO) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+FILTERED_DOCKER_ARGS=()
+for ((i = 0; i < ${#DOCKER_EXTRA_ARGS[@]}; i++)); do
+    case "${DOCKER_EXTRA_ARGS[$i]}" in
+        -e|--env)
+            if reserved_target_env \
+                    "${DOCKER_EXTRA_ARGS[$((i + 1))]:-}"; then
+                i=$((i + 1))
+                continue
+            fi
+            ;;
+        -e*|--env=*)
+            inline_env="${DOCKER_EXTRA_ARGS[$i]#-e}"
+            inline_env="${inline_env#--env=}"
+            reserved_target_env "$inline_env" && continue
+            ;;
+    esac
+    FILTERED_DOCKER_ARGS+=("${DOCKER_EXTRA_ARGS[$i]}")
+done
+DOCKER_EXTRA_ARGS=("${FILTERED_DOCKER_ARGS[@]}")
 
 parse_start_args() {
     OPEN_DASHBOARD=false
@@ -457,16 +620,13 @@ HELP
         exit 1
     fi
 
+    prepare_target_mirrors
     ensure_bare_repo_for_interactive
     mirror_submodules
     build_image
 
-    local vols_file
-    vols_file=$(mktemp "$RUNTIME_DIR/interactive-vols.XXXXXX")
-    write_mirror_volume_file "$vols_file"
-    MIRROR_ARGS=()
-    read_volume_file "$vols_file"
-    rm -f "$vols_file" "$profile_file"
+    load_mirror_args
+    rm -f "$profile_file"
 
     local EXTRA_ENV=()
     while IFS= read -r _ae; do
@@ -488,6 +648,7 @@ HELP
         --name "$name" \
         -v "${BARE_REPO}:/upstream:rw" \
         "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
+        "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
         "${SIGNING_KEY_ARGS[@]+"${SIGNING_KEY_ARGS[@]}"}" \
         "${DOCKER_EXTRA_ARGS[@]+"${DOCKER_EXTRA_ARGS[@]}"}" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -576,6 +737,7 @@ cmd_start() {
         fi
     fi
 
+    prepare_target_mirrors
     create_bare_repo "bare repo"
 
     # Mirror each submodule so containers can init without network.
@@ -608,14 +770,8 @@ cmd_start() {
 
     build_image
 
-    # Build mirror volume args from discovered submodules.
-    local vols_file
-    vols_file=$(mktemp "$RUNTIME_DIR/mirror-vols.XXXXXX")
-    write_mirror_volume_file "$vols_file"
-
-    # Read mirror volume mounts (shared across all containers).
-    MIRROR_ARGS=()
-    read_volume_file "$vols_file"
+    # Mount the read-only mirror tree (shared across all containers).
+    load_mirror_args
 
     AGENT_IDX=0
     while IFS='|' read -r agent_model agent_base_url agent_api_key agent_effort agent_auth agent_context agent_prompt agent_auth_token agent_tag agent_driver; do
@@ -665,6 +821,7 @@ cmd_start() {
             --name "$NAME" \
             -v "${BARE_REPO}:/upstream:rw" \
             "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
+            "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
             "${SIGNING_KEY_ARGS[@]+"${SIGNING_KEY_ARGS[@]}"}" \
             "${DOCKER_EXTRA_ARGS[@]+"${DOCKER_EXTRA_ARGS[@]}"}" \
             "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -694,7 +851,7 @@ cmd_start() {
             "$IMAGE_NAME"
     done < "$AGENTS_CFG"
 
-    rm -f "$vols_file" "$AGENTS_CFG"
+    rm -f "$AGENTS_CFG"
 
     # Write state file so a standalone dashboard can pick up config.
     local state_model_summary state_config_label
@@ -885,18 +1042,15 @@ cmd_post_process() {
         create_bare_repo "bare repo for post-process"
     fi
 
+    prepare_target_mirrors
     build_image
 
     local NAME="${IMAGE_NAME}-post"
     docker rm -f "$NAME" 2>/dev/null || true
 
-    # Build mirror volume args from existing mirrors.
+    # Mount the read-only mirror tree from existing mirrors.
     local MIRROR_ARGS=()
-    local vols_file
-    vols_file=$(mktemp "$RUNTIME_DIR/pp-vols.XXXXXX")
-    write_mirror_volume_file "$vols_file"
-    read_volume_file "$vols_file"
-    rm -f "$vols_file"
+    load_mirror_args
 
     # Source the driver to access agent_docker_auth / agent_docker_env.
     # shellcheck source=lib/drivers/claude-code.sh
@@ -927,6 +1081,7 @@ cmd_post_process() {
         --name "$NAME" \
         -v "${BARE_REPO}:/upstream:rw" \
         "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
+        "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
         "${SIGNING_KEY_ARGS[@]+"${SIGNING_KEY_ARGS[@]}"}" \
         "${DOCKER_EXTRA_ARGS[@]+"${DOCKER_EXTRA_ARGS[@]}"}" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \

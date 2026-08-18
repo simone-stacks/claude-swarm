@@ -133,17 +133,7 @@ if [ ! -d /workspace/.git ]; then
         git checkout -q -B "$SWARM_INTERACTIVE_BRANCH" origin/agent-work
     fi
 
-    if [ -f .gitmodules ]; then
-        git config --file .gitmodules --get-regexp \
-            'submodule\..*\.path' | while read -r key path; do
-            name="${key#submodule.}"
-            name="${name%.path}"
-            if [ -d "/mirrors/${name}" ]; then
-                git config "submodule.${name}.url" "/mirrors/${name}"
-                git submodule update --init -q -- "$path"
-            fi
-        done
-    fi
+    swarm_init_mirrored_submodules /workspace /mirrors
 
     if [ -d .claude ]; then
         case "$SWARM_CONTEXT" in
@@ -180,6 +170,10 @@ CTXHOOK
         sudo -E bash "$SWARM_SETUP"
         sudo chown -R "$(id -u):$(id -g)" /workspace
     fi
+
+    unset SWARM_READER_TOKEN
+    sudo rm -f /etc/sudoers.d/agent
+    sudo -K
 
     agent_settings /workspace
 
