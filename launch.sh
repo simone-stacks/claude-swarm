@@ -14,6 +14,7 @@ Orchestrate coding agents in Docker containers.
 Default command is 'start' when none is specified.
 
 Commands:
+  validate             Validate swarmfile, prompts, drivers, and auth.
   start [OPTIONS]      Build image, create bare repo, launch agents.
   stop                 Stop all running agent containers.
   logs N               Tail logs for agent N (default: 1).
@@ -487,6 +488,68 @@ parse_start_args() {
     done
 }
 
+validate_config() {
+    local all_groups_have_prompt profile encoded index=0 label driver
+    local api_key auth_token auth base_url auth_output auth_label prompt
+    [ "$NUM_AGENTS" -gt 0 ] || {
+        echo "ERROR: swarmfile must configure at least one agent." >&2
+        return 1
+    }
+
+    all_groups_have_prompt=$(jq \
+        '[.agents[] | has("prompt") and (.prompt | length > 0)] | all' \
+        "$CONFIG_FILE")
+    if [ -z "$SWARM_PROMPT" ] && [ "$all_groups_have_prompt" != true ]; then
+        echo "ERROR: 'prompt' is missing in ${CONFIG_FILE}." >&2
+        return 1
+    fi
+    if [ -n "$SWARM_PROMPT" ] && [ ! -f "$REPO_ROOT/$SWARM_PROMPT" ]; then
+        echo "ERROR: prompt '${SWARM_PROMPT}' not found." >&2
+        return 1
+    fi
+
+    while IFS= read -r encoded; do
+        [ -n "$encoded" ] || continue
+        index=$((index + 1))
+        profile=$(printf '%s' "$encoded" | base64 -d) || return 1
+        label=$(jq -r --argjson i "$index" \
+            '.name // ("profile-" + ($i | tostring))' <<< "$profile")
+        driver=$(jq -r --arg default "$SWARM_DRIVER_DEFAULT" \
+            '.driver // $default' <<< "$profile")
+        [ -f "$SWARM_DIR/lib/drivers/${driver}.sh" ] || {
+            echo "ERROR: unknown driver '${driver}' in ${label}." >&2
+            echo "Available drivers: $(available_drivers)" >&2
+            return 1
+        }
+        prompt=$(jq -r '.prompt // empty' <<< "$profile")
+        if [ -n "$prompt" ] && [ ! -f "$REPO_ROOT/$prompt" ]; then
+            echo "ERROR: prompt '${prompt}' for ${label} not found." >&2
+            return 1
+        fi
+        api_key=$(expand_env_ref "$(jq -r '.api_key // empty' <<< "$profile")")
+        auth_token=$(expand_env_ref "$(jq -r '.auth_token // empty' <<< "$profile")")
+        auth=$(jq -r '.auth // empty' <<< "$profile")
+        base_url=$(jq -r '.base_url // empty' <<< "$profile")
+        # shellcheck source=lib/drivers/claude-code.sh
+        source "$SWARM_DIR/lib/drivers/${driver}.sh"
+        auth_output=$(agent_docker_auth "$api_key" "$auth_token" \
+            "$auth" "$base_url") || return 1
+        auth_label=$(sed -n 's/^SWARM_AUTH_MODE=//p' \
+            <<< "$auth_output" | tail -1)
+        if [ "$driver" != fake ] && [ -z "$auth_label" ]; then
+            echo "ERROR: no usable credentials for ${label} (${driver}/${auth:-default})." >&2
+            return 1
+        fi
+    done < <(jq -r '
+        ([.agents[]?] + ([.post_process] | map(select(. != null))))[]
+        | @base64' "$CONFIG_FILE")
+}
+
+cmd_validate() {
+    validate_config
+    echo "Swarm configuration and credentials validated: $CONFIG_FILE"
+}
+
 print_interactive_profiles() {
     jq -r '.driver as $dd | .agents | to_entries[] |
         "\(.key + 1)|\(.value.name // "")|\(.value.model // "")|" +
@@ -729,33 +792,7 @@ HELP
 }
 
 cmd_start() {
-    # Top-level prompt is optional when every agent group defines its own.
-    local all_groups_have_prompt
-    all_groups_have_prompt=$(jq \
-        '[.agents[] | has("prompt") and (.prompt | length > 0)] | all' \
-        "$CONFIG_FILE")
-
-    if [ -z "$SWARM_PROMPT" ] && [ "$all_groups_have_prompt" != "true" ]; then
-        echo "ERROR: 'prompt' is missing in ${CONFIG_FILE} (required when not every agent group specifies its own)." >&2
-        exit 1
-    fi
-
-    if [ -n "$SWARM_PROMPT" ] && [ ! -f "$REPO_ROOT/$SWARM_PROMPT" ]; then
-        echo "ERROR: prompt '${SWARM_PROMPT}' not found." >&2
-        exit 1
-    fi
-
-    # Validate per-group prompt overrides.
-    local group_prompts
-    group_prompts=$(jq -r '[.agents[].prompt // empty] | unique[]' \
-        "$CONFIG_FILE" 2>/dev/null || true)
-    while IFS= read -r gp; do
-        [ -z "$gp" ] && continue
-        if [ ! -f "$REPO_ROOT/$gp" ]; then
-            echo "ERROR: per-group prompt ${gp} not found." >&2
-            exit 1
-        fi
-    done <<< "$group_prompts"
+    validate_config
 
     local existing_containers
     existing_containers=$(docker ps -a \
@@ -787,23 +824,6 @@ cmd_start() {
         .agents[] | range(.count // 0) as $i |
         [.model, (.base_url // ""), (.api_key // ""), (.effort // ""), (.auth // ""), (.context // ""), (.prompt // ""), (.auth_token // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' \
         "$CONFIG_FILE" > "$AGENTS_CFG"
-
-    # Preflight: validate all referenced drivers exist before
-    # spending time on image build and container startup.
-    local _bad_drivers="" _checked_drivers=" "
-    while IFS='|' read -r _ _ _ _ _ _ _ _ _ _drv; do
-        _drv="${_drv:-${SWARM_DRIVER_DEFAULT}}"
-        [[ "$_checked_drivers" == *" $_drv "* ]] && continue
-        _checked_drivers+="$_drv "
-        if [ ! -f "$SWARM_DIR/lib/drivers/${_drv}.sh" ]; then
-            _bad_drivers+="  - ${_drv}\n"
-        fi
-    done < "$AGENTS_CFG"
-    if [ -n "$_bad_drivers" ]; then
-        printf "ERROR: unknown driver(s):\n%b" "$_bad_drivers" >&2
-        echo "Available drivers: $(available_drivers)" >&2
-        exit 1
-    fi
 
     build_image
 
@@ -1196,6 +1216,7 @@ cmd_post_process() {
 }
 
 case "${1:-start}" in
+    validate)      cmd_validate ;;
     start)
         shift
         parse_start_args "$@"
@@ -1222,7 +1243,7 @@ case "${1:-start}" in
         cmd_interactive shell "$@"
         ;;
     *)
-        echo "Usage: $0 {start|stop|logs N|status|wait|post-process|interactive}" >&2
+        echo "Usage: $0 {validate|start|stop|logs N|status|wait|post-process|interactive}" >&2
         echo "Try '$0 --help' for more information." >&2
         exit 1
         ;;
