@@ -45,7 +45,9 @@ fi
 read_agent_stats() {
     local name=$1 agent_id=$2
     local stats_file="agent_logs/stats_agent_${agent_id}.tsv"
-    local tmpf="/tmp/.swarm-stats-${name}.tsv"
+    local runtime tmpf
+    runtime=$(swarm_runtime_init "$PROJECT")
+    tmpf=$(mktemp "$runtime/stats.XXXXXX")
     docker cp "${name}:/workspace/${stats_file}" "$tmpf" 2>/dev/null || true
     if [ ! -s "$tmpf" ]; then
         rm -f "$tmpf"

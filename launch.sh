@@ -59,7 +59,10 @@ PROJECT="$(swarm_project_id "$PROJECT_RAW")"
 SWARM_RUN_HASH="$(git -C "$REPO_ROOT" rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")"
 SWARM_RUN_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
 SWARM_RUN_CONTEXT="${PROJECT_RAW}@${SWARM_RUN_HASH} (${SWARM_RUN_BRANCH})"
-BARE_REPO="/tmp/${PROJECT}-upstream.git"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+BARE_REPO="$RUNTIME_DIR/upstream.git"
+MIRROR_DIR="$RUNTIME_DIR/mirrors"
+STATE_FILE="$RUNTIME_DIR/swarm-state.json"
 IMAGE_NAME="${PROJECT}-agent"
 
 # Expand a single $VAR reference from the host environment.
@@ -75,19 +78,20 @@ expand_env_ref() {
     fi
 }
 
-# Docker containers may create files owned by a different UID inside
-# bind-mounted host directories.  Plain rm -rf fails without root.
-# Use a throwaway Alpine container (Docker is already required) so
-# we never need sudo/su -c.
-rm_docker_dir() {
-    local dir="$1"
-    [ -d "$dir" ] || return 0
-    local parent base
-    parent="$(dirname "$dir")"
-    base="$(basename "$dir")"
-    docker run --rm -v "${parent}:${parent}" alpine \
-        rm -rf "${parent}/${base}" 2>/dev/null \
-        || rm -rf "$dir" 2>/dev/null || true
+# Remove only an explicitly named child of the verified owner-only runtime.
+safe_runtime_remove() {
+    local path="$1" parent runtime_real
+    parent=$(cd "$(dirname "$path")" && pwd -P)
+    runtime_real=$(cd "$RUNTIME_DIR" && pwd -P)
+    [ "$parent" = "$runtime_real" ] || {
+        echo "ERROR: refusing removal outside runtime: $path" >&2
+        return 1
+    }
+    [ ! -L "$path" ] || {
+        echo "ERROR: refusing symlink in runtime: $path" >&2
+        return 1
+    }
+    rm -rf -- "$path"
 }
 
 # Compute the comma-separated SWARM_AGENTS build-arg from a config:
@@ -140,7 +144,7 @@ build_image() {
 create_bare_repo() {
     local label="${1:-bare repo}"
     echo "--- Creating ${label} ---"
-    rm_docker_dir "$BARE_REPO"
+    safe_runtime_remove "$BARE_REPO"
     # Local clones hardlink packed objects by default. The bare repo is mounted
     # through Docker Desktop while the source stays on the host. Keep its
     # object storage independent so receive-pack does not depend on inodes
@@ -174,13 +178,16 @@ ensure_bare_repo_for_interactive() {
 }
 
 mirror_submodules() {
+    # Rebuild the mirror tree below the private runtime. The per-name layout
+    # is the contract the in-container harness consumes at /mirrors/<name>.
+    safe_runtime_remove "$MIRROR_DIR"
+    mkdir -p "$MIRROR_DIR"
     cd "$REPO_ROOT"
     git submodule foreach --quiet 'echo "$name|$toplevel/.git/modules/$sm_path"' | \
     while IFS='|' read -r name gitdir; do
         local safe_name mirror
         safe_name="${name//\//_}"
-        mirror="/tmp/${PROJECT}-mirror-${safe_name}.git"
-        rm_docker_dir "$mirror"
+        mirror="$MIRROR_DIR/${safe_name}.git"
         echo "--- Mirroring submodule: ${name} ---"
         git clone --bare "$gitdir" "$mirror"
         chmod -R a+rwX "$mirror"
@@ -194,7 +201,7 @@ write_mirror_volume_file() {
     while read -r name; do
         local safe_name mirror
         safe_name="${name//\//_}"
-        mirror="/tmp/${PROJECT}-mirror-${safe_name}.git"
+        mirror="$MIRROR_DIR/${safe_name}.git"
         [ -d "$mirror" ] || continue
         echo "-v ${mirror}:/mirrors/${name}:ro"
     done > "$output_file"
@@ -391,7 +398,7 @@ HELP
     done
 
     local profile_file
-    profile_file="/tmp/${PROJECT}-interactive-profile-$$.json"
+    profile_file=$(mktemp "$RUNTIME_DIR/interactive-profile.XXXXXX.json")
     select_interactive_profile "$selector" "$selector_index" "$profile_file"
 
     local profile_name profile_label safe_profile short_id branch name
@@ -454,7 +461,8 @@ HELP
     mirror_submodules
     build_image
 
-    local vols_file="/tmp/${PROJECT}-interactive-vols.txt"
+    local vols_file
+    vols_file=$(mktemp "$RUNTIME_DIR/interactive-vols.XXXXXX")
     write_mirror_volume_file "$vols_file"
     MIRROR_ARGS=()
     read_volume_file "$vols_file"
@@ -575,7 +583,7 @@ cmd_start() {
 
     # Build per-agent config (model|base_url|api_key|effort|auth|context|prompt|auth_token|tag|driver per line).
     # Uses pipe delimiter because bash IFS=$'\t' collapses consecutive tabs.
-    AGENTS_CFG="/tmp/${PROJECT}-agents.cfg"
+    AGENTS_CFG="$RUNTIME_DIR/agents.cfg"
     jq -r '.tag as $dt | .driver as $dd |
         .agents[] | range(.count // 0) as $i |
         [.model, (.base_url // ""), (.api_key // ""), (.effort // ""), (.auth // ""), (.context // ""), (.prompt // ""), (.auth_token // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' \
@@ -601,11 +609,13 @@ cmd_start() {
     build_image
 
     # Build mirror volume args from discovered submodules.
-    write_mirror_volume_file "/tmp/${PROJECT}-mirror-vols.txt"
+    local vols_file
+    vols_file=$(mktemp "$RUNTIME_DIR/mirror-vols.XXXXXX")
+    write_mirror_volume_file "$vols_file"
 
     # Read mirror volume mounts (shared across all containers).
     MIRROR_ARGS=()
-    read_volume_file "/tmp/${PROJECT}-mirror-vols.txt"
+    read_volume_file "$vols_file"
 
     AGENT_IDX=0
     while IFS='|' read -r agent_model agent_base_url agent_api_key agent_effort agent_auth agent_context agent_prompt agent_auth_token agent_tag agent_driver; do
@@ -684,7 +694,7 @@ cmd_start() {
             "$IMAGE_NAME"
     done < "$AGENTS_CFG"
 
-    rm -f "/tmp/${PROJECT}-mirror-vols.txt" "/tmp/${PROJECT}-agents.cfg"
+    rm -f "$vols_file" "$AGENTS_CFG"
 
     # Write state file so a standalone dashboard can pick up config.
     local state_model_summary state_config_label
@@ -703,13 +713,22 @@ cmd_start() {
     state_config_label=$(basename "$CONFIG_FILE")
     local config_title
     config_title=$(jq -r '.title // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    cat > "/tmp/${PROJECT}-swarm.env" <<ENVEOF
-SWARM_TITLE="${SWARM_TITLE:-${config_title}}"
-SWARM_CONFIG="${CONFIG_FILE}"
-SWARM_NUM_AGENTS="${NUM_AGENTS}"
-SWARM_MODEL_SUMMARY="${state_model_summary}"
-SWARM_CONFIG_LABEL="${state_config_label}"
-ENVEOF
+    local state_tmp
+    state_tmp=$(mktemp "$RUNTIME_DIR/swarm-state.XXXXXX.json")
+    jq -n \
+        --arg title "${SWARM_TITLE:-${config_title}}" \
+        --arg config "$CONFIG_FILE" \
+        --argjson num_agents "$NUM_AGENTS" \
+        --arg model_summary "$state_model_summary" \
+        --arg config_label "$state_config_label" \
+        --arg target_repo "${TARGET_REPO:-}" \
+        --arg target_rev "${TARGET_REV:-}" \
+        '{schema:"claude-swarm.state/v1", title:$title, config:$config,
+          num_agents:$num_agents, model_summary:$model_summary,
+          config_label:$config_label, target_repo:$target_repo,
+          target_rev:$target_rev}' > "$state_tmp"
+    chmod 600 "$state_tmp"
+    mv "$state_tmp" "$STATE_FILE"
 
     echo ""
     echo "--- ${NUM_AGENTS} agents launched ---"
@@ -751,7 +770,8 @@ cmd_stop() {
     docker stop -t "$stop_timeout" "$NAME" 2>/dev/null \
         && echo "  stopped ${NAME}" \
         || echo "  ${NAME} not running"
-    rm -f "/tmp/${PROJECT}-swarm.env"
+    # Preserve the last-run state for dashboards and forensics. A future start
+    # replaces it atomically after the new roster has launched.
 }
 
 cmd_logs() {
@@ -872,9 +892,11 @@ cmd_post_process() {
 
     # Build mirror volume args from existing mirrors.
     local MIRROR_ARGS=()
-    write_mirror_volume_file "/tmp/${PROJECT}-pp-vols.txt"
-    read_volume_file "/tmp/${PROJECT}-pp-vols.txt"
-    rm -f "/tmp/${PROJECT}-pp-vols.txt"
+    local vols_file
+    vols_file=$(mktemp "$RUNTIME_DIR/pp-vols.XXXXXX")
+    write_mirror_volume_file "$vols_file"
+    read_volume_file "$vols_file"
+    rm -f "$vols_file"
 
     # Source the driver to access agent_docker_auth / agent_docker_env.
     # shellcheck source=lib/drivers/claude-code.sh

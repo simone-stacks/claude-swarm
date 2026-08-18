@@ -36,9 +36,9 @@ Or clone standalone and run from your project directory
 ## How it works
 
 ```
-Host                         /tmp (bare repos)
-~/project/ ── git clone ──>  project-upstream.git (rw)
-               --bare        project-mirror-*.git (ro)
+Host                         private project runtime (0700)
+~/project/ ── git clone ──>  upstream.git (rw)
+               --bare        mirrors/*.git (ro)
                                         |
                                         | docker volumes
                                         |
@@ -62,6 +62,15 @@ Interactive containers use the same image and setup, but start a
 human-guided driver UI or shell on a separate
 `swarm/<run>/interactive-*` branch. `harvest.sh` merges those
 branches explicitly alongside `agent-work`.
+
+Host-side state -- the bare repo, submodule mirrors, locks, and the
+dashboard state file -- lives below one owner-only (mode 0700) runtime
+directory instead of predictable top-level `/tmp` paths. The runtime
+defaults to `$XDG_STATE_HOME/claude-swarm/<project>` (or
+`$HOME/.local/state/claude-swarm/<project>`); an absolute
+`CLAUDE_SWARM_RUNTIME_DIR` overrides it. Existing top-level `/tmp`
+state is migrated only after same-owner, non-symlink, unlocked,
+collision-free validation.
 
 ## Quick start
 

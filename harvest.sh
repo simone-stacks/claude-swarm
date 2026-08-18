@@ -12,7 +12,8 @@ source "$SWARM_DIR/lib/project.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PROJECT="$(swarm_project_id "$(basename "$REPO_ROOT")")"
-BARE_REPO="/tmp/${PROJECT}-upstream.git"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+BARE_REPO="$RUNTIME_DIR/upstream.git"
 REMOTE_NAME="_agent-harvest"
 DRY_RUN=false
 
@@ -28,7 +29,7 @@ Options:
   --dry        Show what would be merged without actually merging.
   -h, --help   Show this help message.
 
-The bare repo is expected at /tmp/<project>-upstream.git,
+The bare repo lives below the owner-only project runtime,
 created by launch.sh when starting agents.
 HELP
             exit 0
@@ -52,7 +53,7 @@ warn_dirty_interactive_containers() {
                 'cd /workspace && [ -n "$(git status --porcelain=v1)" ] && echo true || echo false' \
                 2>/dev/null || true)
         else
-            tmpf="/tmp/.swarm-harvest-${name}.state"
+            tmpf=$(mktemp "$RUNTIME_DIR/harvest-state.XXXXXX")
             docker cp "${name}:/workspace/agent_logs/interactive_state" \
                 "$tmpf" 2>/dev/null || true
             if [ -s "$tmpf" ]; then

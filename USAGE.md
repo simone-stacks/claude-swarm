@@ -53,6 +53,7 @@ Credentials stay as env vars (not in shell history).
 | `SWARM_ACTIVITY_POLL` | `10` | Watchdog mtime-poll interval, in seconds.  Rarely needs tuning. |
 | `SWARM_WATCHDOG_GRACE` | `10` | Grace window between watchdog SIGTERM and SIGKILL.  Rarely needs tuning. |
 | `SWARM_STOP_TIMEOUT` | `60` | Seconds `./launch.sh stop` passes to `docker stop -t`, so the harness's SIGTERM trap has time to ship any in-flight local commits via `_session_end_push` before SIGKILL hits.  See [Stopping the swarm](#stopping-the-swarm). |
+| `CLAUDE_SWARM_RUNTIME_DIR` | `$XDG_STATE_HOME/claude-swarm/<project>` | Absolute owner-only (mode 0700) runtime override. Holds the bare repo, submodule mirrors, locks, and dashboard state. |
 
 Per-group credentials (`api_key`, `auth_token`, `base_url`)
 are set in the swarmfile.  Use `$VAR` references to pull
@@ -885,7 +886,7 @@ Clean up afterwards:
 ```bash
 PROJECT=$(basename $(pwd))
 docker rm -f ${PROJECT}-agent-1 2>/dev/null
-rm -rf /tmp/${PROJECT}-upstream.git
+rm -rf "$XDG_STATE_HOME/claude-swarm/${PROJECT}"
 ```
 
 ## Cleanup
@@ -894,17 +895,22 @@ After a swarm run, the following artifacts remain on disk:
 
 | Artifact | Path |
 |----------|------|
-| Bare repo | `/tmp/<project>-upstream.git` |
-| Submodule mirrors | `/tmp/<project>-mirror-*.git` |
+| Bare repo | `<runtime>/upstream.git` |
+| Submodule mirrors | `<runtime>/mirrors/*.git` |
 | Agent containers | `<project>-agent-N` |
-| State file | `/tmp/<project>-swarm.env` |
+| State file | `<runtime>/swarm-state.json` |
+
+The runtime is `$XDG_STATE_HOME/claude-swarm/<project>` by default
+(`$HOME/.local/state/claude-swarm/<project>` when XDG is unset), or
+`$CLAUDE_SWARM_RUNTIME_DIR` when overridden.
+
 Remove everything for a fresh start:
 
 ```bash
 PROJECT=$(basename $(pwd))
+RUNTIME=${CLAUDE_SWARM_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-swarm/$PROJECT}
 docker rm -f $(docker ps -aq --filter "name=${PROJECT}-agent-") 2>/dev/null
-rm -rf /tmp/${PROJECT}-upstream.git /tmp/${PROJECT}-mirror-*.git
-rm -f  /tmp/${PROJECT}-swarm.env
+rm -rf "$RUNTIME"
 ```
 
 ## Verify image
