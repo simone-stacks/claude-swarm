@@ -171,7 +171,30 @@ agent_extract_stats() {
             "$logfile" 2>/dev/null || true)
         stats="${stats%$'\t'*}	${turns:-0}"
     fi
-    printf '%s' "$stats"
+
+    # qwen folds cache reads into usage.input_tokens: its total_tokens
+    # is input + output, so a session whose cache_read_input_tokens
+    # nearly equals input_tokens spent almost nothing on fresh input
+    # (verified against real session logs; qwen reports no
+    # cache-creation bucket).  The pricing map expects Claude's
+    # disjoint buckets, where input_tokens excludes cache reads, so
+    # subtract them here -- in the qwen driver only, the shared parser
+    # stays generic -- or cache reads are billed twice.
+    local cost tok_in tok_out cache_rd tail
+    cost="${stats%%$'\t'*}"
+    tail="${stats#*$'\t'}"
+    tok_in="${tail%%$'\t'*}"
+    tail="${tail#*$'\t'}"
+    tok_out="${tail%%$'\t'*}"
+    tail="${tail#*$'\t'}"
+    cache_rd="${tail%%$'\t'*}"
+    tail="${tail#*$'\t'}"
+    tok_in=$(( tok_in - cache_rd ))
+    if [ "$tok_in" -lt 0 ]; then
+        tok_in=0
+    fi
+    printf '%s\t%s\t%s\t%s\t%s' \
+        "$cost" "$tok_in" "$tok_out" "$cache_rd" "$tail"
 }
 
 # Return the jq program for parsing activity from Qwen stream-json.

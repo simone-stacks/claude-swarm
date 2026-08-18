@@ -2307,12 +2307,37 @@ EOF
 QSTATS=$(agent_extract_stats "$TMPDIR/qwen-session.jsonl")
 IFS=$'\t' read -r q_cost q_in q_out q_cache_rd q_cache_cr q_dur q_api_ms q_turns <<< "$QSTATS"
 
+# qwen folds cache reads into input_tokens; the driver subtracts
+# them so tok_in matches Claude's disjoint buckets.
 assert_eq "qwen cost is 0 (no cost in stream-json)" "0" "$q_cost"
-assert_eq "qwen tok_in"  "100" "$q_in"
+assert_eq "qwen tok_in excludes cache reads" "90" "$q_in"
 assert_eq "qwen tok_out" "50"  "$q_out"
 assert_eq "qwen cache_rd" "10" "$q_cache_rd"
 assert_eq "qwen duration" "1234" "$q_dur"
 assert_eq "qwen turns falls back to assistant count" "2" "$q_turns"
+
+# Real-session shape: cache_read_input_tokens nearly equals
+# input_tokens because total_tokens is input + output.  Numbers from
+# an actual qwen3.8-max run.
+cat > "$TMPDIR/qwen-cache.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1481344,"duration_api_ms":1477652,"num_turns":81,"result":"Done.","usage":{"input_tokens":11080283,"output_tokens":54285,"cache_read_input_tokens":10893116,"total_tokens":11134568}}
+EOF
+QSTATS=$(agent_extract_stats "$TMPDIR/qwen-cache.jsonl")
+IFS=$'\t' read -r q_cost q_in q_out q_cache_rd q_cache_cr q_dur q_api_ms q_turns <<< "$QSTATS"
+assert_eq "qwen cached session tok_in" "187167"  "$q_in"
+assert_eq "qwen cached session tok_out" "54285"  "$q_out"
+assert_eq "qwen cached session cache_rd" "10893116" "$q_cache_rd"
+assert_eq "qwen cached session turns" "81" "$q_turns"
+
+# No cache reads: tok_in passes through unchanged.
+cat > "$TMPDIR/qwen-nocache.jsonl" <<'EOF'
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"Done.","usage":{"input_tokens":64000,"output_tokens":1200,"total_tokens":65200}}
+EOF
+QSTATS=$(agent_extract_stats "$TMPDIR/qwen-nocache.jsonl")
+IFS=$'\t' read -r q_cost q_in q_out q_cache_rd q_cache_cr q_dur q_api_ms q_turns <<< "$QSTATS"
+assert_eq "qwen no-cache tok_in unchanged" "64000" "$q_in"
+assert_eq "qwen no-cache cache_rd zero" "0" "$q_cache_rd"
 
 # num_turns on the result object wins over the assistant count.
 cat > "$TMPDIR/qwen-turns.jsonl" <<'EOF'

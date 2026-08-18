@@ -9,7 +9,9 @@
   from stream-json tool calls, fatal/retriable error detection,
   and reasoning effort support via `model.reasoningEffort`.
   stream-json carries usage but no cost, so cost comes from the
-  swarmfile `pricing` map.
+  swarmfile `pricing` map.  The CLI folds cache reads into
+  `input_tokens`; the driver subtracts them so `tok_in` matches
+  Claude's disjoint buckets and cache reads are not billed twice.
 - **Qwen auth modes.** Qwen agents authenticate via
   `"auth": "apikey"` (host `QWEN_API_KEY`/`DASHSCOPE_API_KEY`
   forwarded as `DASHSCOPE_API_KEY`; the driver synthesizes
