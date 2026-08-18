@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Fail-closed bare-repo and container lifecycle.** Replacing the
+  bare repo is transactional (built aside, fsck'd, swapped with
+  rollback) and refused while any `agent-work`/`swarm` ref tip is not
+  an ancestor of HEAD; a stale-but-contained bare refreshes itself.
+  Bare permissions drop `sharedRepository world` for owner-only.
+  Every agent, interactive, and post-process container carries
+  `org.claude-swarm.*` labels, and an already-existing container fails
+  the launch instead of being force-removed. The harvest ancestry
+  guard no longer suggests deleting the bare repo.
 - **Host-side target mirrors.** `TARGET_REPO`@`TARGET_REV` is resolved
   once on the host into a private mirror mounted read-only at
   `/target-upstream`; the optional `SWARM_READER_TOKEN` travels only
