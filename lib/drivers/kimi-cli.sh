@@ -154,10 +154,24 @@ agent_extract_stats() {
     local _home="${KIMI_CODE_HOME:-${HOME}/.kimi-code}"
     local _usage_jsonl=""
     if [ -n "${SWARM_KIMI_RUN_MARK:-}" ]; then
-        _usage_jsonl=$(find "$_home/sessions" \
-            -path '*/agents/main/wire.jsonl' \
-            -newermt "@$(( SWARM_KIMI_RUN_MARK - 2 ))" \
-            -exec cat {} + 2>/dev/null || true)
+        # Portable mtime filter: BSD find has no -newermt, so compare
+        # stat mtimes instead (stat -c %Y is GNU, stat -f %m is BSD).
+        # The 2-second slack covers same-second writes.
+        local _w _mtime
+        _usage_jsonl=$(
+            for _w in "$_home"/sessions/*/*/agents/main/wire.jsonl; do
+                [ -f "$_w" ] || continue
+                _mtime=$(stat -c %Y "$_w" 2>/dev/null \
+                    || stat -f %m "$_w" 2>/dev/null || echo 0)
+                if [ "${_mtime:-0}" -gt \
+                        $(( SWARM_KIMI_RUN_MARK - 2 )) ]; then
+                    cat "$_w"
+                    # Guarantee a line boundary between wires: a
+                    # killed run leaves a truncated tail line.
+                    echo
+                fi
+            done
+        )
     else
         local _wire
         _wire=$(ls -t "$_home"/sessions/*/*/agents/main/wire.jsonl \

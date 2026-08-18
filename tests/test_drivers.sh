@@ -1824,7 +1824,8 @@ mkdir -p "$KWIRE_HOME/sessions/wd_test_abc/session_s0/agents/main"
 cat > "$KWIRE_HOME/sessions/wd_test_abc/session_s0/agents/main/wire.jsonl" <<'EOF'
 {"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":9000,"output":900,"inputCacheRead":90000,"inputCacheCreation":90}}
 EOF
-touch -d '1 hour ago' \
+# BSD touch has no -d; a fixed past timestamp is portable.
+touch -t 202001010000.00 \
     "$KWIRE_HOME/sessions/wd_test_abc/session_s0/agents/main/wire.jsonl"
 
 KSTATS=$(KIMI_CODE_HOME="$KWIRE_HOME" SWARM_KIMI_RUN_MARK="$(date +%s)" \
