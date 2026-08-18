@@ -112,7 +112,10 @@ compute_swarm_agents() {
         out="${out:+${out},}${drv}"
     done < <(jq -r '.agents[]? | (.driver // "")' "$cfg")
     local pp_drv
-    pp_drv=$(jq -r '.post_process.driver // .driver // "claude-code"' "$cfg")
+    pp_drv=$(jq -r '
+        if .post_process == null then ""
+        else (.post_process.driver // .driver // "claude-code")
+        end' "$cfg")
     if [ -n "$pp_drv" ] && [[ "$seen" != *" $pp_drv "* ]]; then
         out="${out:+${out},}${pp_drv}"
     fi
