@@ -1679,6 +1679,13 @@ source "$_EXTRACTED"
 assert_eq "function defined" "function" \
     "$(type -t compute_swarm_agents)"
 
+cat > "$TMPDIR/csa_fake.json" <<'EOF'
+{ "prompt": "p.md",
+  "agents": [{ "count": 1, "model": "fake", "driver": "fake" }] }
+EOF
+assert_eq "absent post-process adds no implicit driver" "fake" \
+    "$(compute_swarm_agents "$TMPDIR/csa_fake.json")"
+
 cat > "$TMPDIR/csa_default.json" <<'EOF'
 { "prompt": "p.md",
   "agents": [{ "count": 2, "model": "claude-opus-4-6" }] }
