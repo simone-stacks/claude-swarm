@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Private runtime.** Bare repository, submodule mirrors, locks,
+  and dashboard state live below one mode-0700 runtime directory
+  instead of predictable top-level `/tmp` paths. Local state defaults
+  to the persistent XDG state directory;
+  `CLAUDE_SWARM_RUNTIME_DIR` overrides it. Legacy top-level `/tmp`
+  state is preserved by validated same-owner migration. Dashboard
+  state is validated JSON (`claude-swarm.state/v1`) rather than
+  sourced shell text.
+
 - **Qwen Code CLI driver.** New `qwen-cli` driver
   (`lib/drivers/qwen-cli.sh`) implements the full interface for
   Alibaba's Qwen Code CLI: headless mode with

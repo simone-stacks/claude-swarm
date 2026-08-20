@@ -10,15 +10,19 @@ TMPDIR=$(mktemp -d)
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HARVEST_SH="$REPO_ROOT/harvest.sh"
 HARVEST_BARE=""
+HARVEST_RUNTIME=""
 GUARD_BARE=""
+GUARD_RUNTIME=""
 INTERACTIVE_BARE=""
+INTERACTIVE_RUNTIME=""
 TAG_BARE=""
+TAG_RUNTIME=""
 cleanup() {
     rm -rf "$TMPDIR"
-    [ -n "${HARVEST_BARE:-}" ] && rm -rf "$HARVEST_BARE"
-    [ -n "${GUARD_BARE:-}" ]   && rm -rf "$GUARD_BARE"
-    [ -n "${INTERACTIVE_BARE:-}" ] && rm -rf "$INTERACTIVE_BARE"
-    [ -n "${TAG_BARE:-}" ] && rm -rf "$TAG_BARE"
+    [ -n "${HARVEST_RUNTIME:-}" ] && rm -rf "$HARVEST_RUNTIME"
+    [ -n "${GUARD_RUNTIME:-}" ] && rm -rf "$GUARD_RUNTIME"
+    [ -n "${INTERACTIVE_RUNTIME:-}" ] && rm -rf "$INTERACTIVE_RUNTIME"
+    [ -n "${TAG_RUNTIME:-}" ] && rm -rf "$TAG_RUNTIME"
 }
 trap cleanup EXIT
 
@@ -233,9 +237,11 @@ echo "=== 7. Behavioural: harvest.sh --dry survives >20 commits ==="
 
 HARVEST_PROJECT="swarmtest-harvest-sigpipe-$$"
 HARVEST_WORK="$TMPDIR/$HARVEST_PROJECT"
-HARVEST_BARE="/tmp/${HARVEST_PROJECT}-upstream.git"
+HARVEST_RUNTIME="/tmp/${HARVEST_PROJECT}-swarm-runtime"
+HARVEST_BARE="$HARVEST_RUNTIME/upstream.git"
 
-rm -rf "$HARVEST_BARE" "$HARVEST_WORK"
+rm -rf "$HARVEST_RUNTIME" "$HARVEST_WORK"
+mkdir -m 700 "$HARVEST_RUNTIME"
 mkdir -p "$HARVEST_WORK"
 git init -q "$HARVEST_WORK"
 cd "$HARVEST_WORK"
@@ -263,7 +269,8 @@ done
 git push -q origin agent-work
 
 cd "$HARVEST_WORK"
-if output=$(bash "$HARVEST_SH" --dry 2>&1); then
+if output=$(CLAUDE_SWARM_RUNTIME_DIR="$HARVEST_RUNTIME" \
+        bash "$HARVEST_SH" --dry 2>&1); then
     rc=0
 else
     rc=$?
@@ -286,11 +293,13 @@ echo "=== 7.5 Behavioural: harvest.sh sees interactive branches ==="
 
 INTERACTIVE_PROJECT="swarmtest-harvest-interactive-$$"
 INTERACTIVE_WORK="$TMPDIR/$INTERACTIVE_PROJECT"
-INTERACTIVE_BARE="/tmp/${INTERACTIVE_PROJECT}-upstream.git"
+INTERACTIVE_RUNTIME="/tmp/${INTERACTIVE_PROJECT}-swarm-runtime"
+INTERACTIVE_BARE="$INTERACTIVE_RUNTIME/upstream.git"
 INTERACTIVE_AGENT="$TMPDIR/harvest-interactive-agent"
 INTERACTIVE_BRANCH="swarm/test/interactive-hunter-a1b2"
 
-rm -rf "$INTERACTIVE_WORK" "$INTERACTIVE_BARE" "$INTERACTIVE_AGENT"
+rm -rf "$INTERACTIVE_WORK" "$INTERACTIVE_RUNTIME" "$INTERACTIVE_AGENT"
+mkdir -m 700 "$INTERACTIVE_RUNTIME"
 mkdir -p "$INTERACTIVE_WORK"
 git init -q "$INTERACTIVE_WORK"
 cd "$INTERACTIVE_WORK"
@@ -310,7 +319,8 @@ git push -q origin "HEAD:refs/heads/${INTERACTIVE_BRANCH}"
 rm -rf "$INTERACTIVE_AGENT"
 
 cd "$INTERACTIVE_WORK"
-if int_output=$(bash "$HARVEST_SH" --dry 2>&1); then
+if int_output=$(CLAUDE_SWARM_RUNTIME_DIR="$INTERACTIVE_RUNTIME" \
+        bash "$HARVEST_SH" --dry 2>&1); then
     int_rc=0
 else
     int_rc=$?
@@ -321,7 +331,8 @@ assert_eq "interactive branch header shown" "true" \
         | grep -q "^1 new commits on ${INTERACTIVE_BRANCH}:" \
         && echo true || echo false)"
 
-if int_merge_output=$(bash "$HARVEST_SH" 2>&1); then
+if int_merge_output=$(CLAUDE_SWARM_RUNTIME_DIR="$INTERACTIVE_RUNTIME" \
+        bash "$HARVEST_SH" 2>&1); then
     int_merge_rc=0
 else
     int_merge_rc=$?
@@ -397,10 +408,12 @@ echo "=== 9. Behavioural: harvest.sh refuses divergent bare ==="
 
 GUARD_PROJECT="swarmtest-harvest-guard-$$"
 GUARD_WORK="$TMPDIR/$GUARD_PROJECT"
-GUARD_BARE="/tmp/${GUARD_PROJECT}-upstream.git"
+GUARD_RUNTIME="/tmp/${GUARD_PROJECT}-swarm-runtime"
+GUARD_BARE="$GUARD_RUNTIME/upstream.git"
 GUARD_AGENT="$TMPDIR/harvest-guard-agent"
 
-rm -rf "$GUARD_WORK" "$GUARD_BARE" "$GUARD_AGENT"
+rm -rf "$GUARD_WORK" "$GUARD_RUNTIME" "$GUARD_AGENT"
+mkdir -m 700 "$GUARD_RUNTIME"
 mkdir -p "$GUARD_WORK"
 git init -q "$GUARD_WORK"
 cd "$GUARD_WORK"
@@ -428,7 +441,8 @@ rm -rf "$GUARD_AGENT"
 cd "$GUARD_WORK"
 HEAD_BEFORE=$(git rev-parse HEAD)
 set +e
-guard_output=$(bash "$HARVEST_SH" 2>&1)
+guard_output=$(CLAUDE_SWARM_RUNTIME_DIR="$GUARD_RUNTIME" \
+    bash "$HARVEST_SH" 2>&1)
 guard_rc=$?
 set -e
 HEAD_AFTER=$(git rev-parse HEAD)
@@ -465,7 +479,8 @@ rm -rf "$GUARD_AGENT"
 
 cd "$GUARD_WORK"
 set +e
-ff_output=$(bash "$HARVEST_SH" 2>&1)
+ff_output=$(CLAUDE_SWARM_RUNTIME_DIR="$GUARD_RUNTIME" \
+    bash "$HARVEST_SH" 2>&1)
 ff_rc=$?
 set -e
 
@@ -486,10 +501,12 @@ echo "=== 10. Restore tag created before harvest ==="
 
 TAG_PROJECT="swarmtest-harvest-tag-$$"
 TAG_WORK="$TMPDIR/$TAG_PROJECT"
-TAG_BARE="/tmp/${TAG_PROJECT}-upstream.git"
+TAG_RUNTIME="/tmp/${TAG_PROJECT}-swarm-runtime"
+TAG_BARE="$TAG_RUNTIME/upstream.git"
 TAG_AGENT="$TMPDIR/harvest-tag-agent"
 
-rm -rf "$TAG_WORK" "$TAG_BARE" "$TAG_AGENT"
+rm -rf "$TAG_WORK" "$TAG_RUNTIME" "$TAG_AGENT"
+mkdir -m 700 "$TAG_RUNTIME"
 mkdir -p "$TAG_WORK"
 git init -q "$TAG_WORK"
 cd "$TAG_WORK"
@@ -510,13 +527,15 @@ rm -rf "$TAG_AGENT"
 
 cd "$TAG_WORK"
 # A dry run must not create a restore tag.
-bash "$HARVEST_SH" --dry >/dev/null 2>&1 || true
+CLAUDE_SWARM_RUNTIME_DIR="$TAG_RUNTIME" \
+    bash "$HARVEST_SH" --dry >/dev/null 2>&1 || true
 assert_eq "dry run creates no restore tag" "0" \
     "$(git tag --list 'swarm-harvest-*' | grep -c . || true)"
 
 # A real harvest tags the pre-merge HEAD, then merges.
 TAG_HEAD_BEFORE=$(git rev-parse HEAD)
-bash "$HARVEST_SH" >/dev/null 2>&1 || true
+CLAUDE_SWARM_RUNTIME_DIR="$TAG_RUNTIME" \
+    bash "$HARVEST_SH" >/dev/null 2>&1 || true
 assert_eq "harvest creates one restore tag" "1" \
     "$(git tag --list 'swarm-harvest-*' | grep -c . || true)"
 TAG_NAME=$(git tag --list 'swarm-harvest-*' | head -1)
@@ -524,7 +543,8 @@ assert_eq "restore tag points at pre-merge HEAD" "$TAG_HEAD_BEFORE" \
     "$(git rev-parse "${TAG_NAME}^{commit}")"
 
 # A second harvest with nothing new must not add another tag.
-bash "$HARVEST_SH" >/dev/null 2>&1 || true
+CLAUDE_SWARM_RUNTIME_DIR="$TAG_RUNTIME" \
+    bash "$HARVEST_SH" >/dev/null 2>&1 || true
 assert_eq "noop harvest adds no restore tag" "1" \
     "$(git tag --list 'swarm-harvest-*' | grep -c . || true)"
 

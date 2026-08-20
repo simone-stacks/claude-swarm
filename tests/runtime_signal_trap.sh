@@ -94,6 +94,7 @@ git clone -q "$WORKDIR/upstream.git" "$WORKDIR/seed"
     cd "$WORKDIR/seed" || exit 1
     git config user.email t@t
     git config user.name t
+    git config commit.gpgsign false
     mkdir -p prompts
     echo "test prompt for runtime check" > prompts/test.md
     git add prompts/test.md

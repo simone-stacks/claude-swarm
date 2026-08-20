@@ -49,7 +49,8 @@ source "$SWARM_DIR/lib/project.sh"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PROJECT_RAW="$(basename "$REPO_ROOT")"
 PROJECT="$(swarm_project_id "$PROJECT_RAW")"
-BARE_REPO="/tmp/${PROJECT}-upstream.git"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+BARE_REPO="$RUNTIME_DIR/upstream.git"
 IMAGE_NAME="${PROJECT}-agent"
 START_TIME=$(date +%s)
 
@@ -62,13 +63,19 @@ DEFAULT_TITLE="${PROJECT_RAW}"
 # Save user's explicit env var so it takes priority over state file.
 USER_TITLE="${SWARM_TITLE:-}"
 
-# Source state file written by launch.sh (fills in env vars
-# that a standalone dashboard would otherwise lack).
-STATE_FILE="/tmp/${PROJECT}-swarm.env"
-if [ -f "$STATE_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$STATE_FILE"
-fi
+# Read machine data as JSON; never source engagement-controlled text as shell.
+STATE_FILE="$RUNTIME_DIR/swarm-state.json"
+load_state() {
+    [ -f "$STATE_FILE" ] || return 0
+    jq -e '.schema == "claude-swarm.state/v1"' "$STATE_FILE" \
+        >/dev/null 2>&1 || return 1
+    SWARM_TITLE=$(jq -r '.title // empty' "$STATE_FILE")
+    SWARM_CONFIG=$(jq -r '.config // empty' "$STATE_FILE")
+    SWARM_NUM_AGENTS=$(jq -r '.num_agents // empty' "$STATE_FILE")
+    SWARM_MODEL_SUMMARY=$(jq -r '.model_summary // empty' "$STATE_FILE")
+    SWARM_CONFIG_LABEL=$(jq -r '.config_label // empty' "$STATE_FILE")
+}
+load_state || echo "WARNING: ignoring invalid state file: $STATE_FILE" >&2
 
 DASHBOARD_TITLE="${USER_TITLE:-${SWARM_TITLE:-${DEFAULT_TITLE}}}"
 
@@ -294,7 +301,8 @@ truncate_str() {
 read_agent_stats() {
     local name=$1 agent_id=$2
     local stats_file="agent_logs/stats_agent_${agent_id}.tsv"
-    local tmpf="/tmp/.swarm-stats-${name}.tsv"
+    local tmpf
+    tmpf=$(mktemp "$RUNTIME_DIR/stats.XXXXXX")
     docker cp "${name}:/workspace/${stats_file}" "$tmpf" 2>/dev/null || true
     if [ ! -s "$tmpf" ]; then
         rm -f "$tmpf"
@@ -313,7 +321,8 @@ read_agent_stats() {
 read_idle_state() {
     local name=$1 agent_id=$2
     local idle_file="agent_logs/idle_agent_${agent_id}"
-    local tmpf="/tmp/.swarm-idle-${name}"
+    local tmpf
+    tmpf=$(mktemp "$RUNTIME_DIR/idle.XXXXXX")
     docker cp "${name}:/workspace/${idle_file}" "$tmpf" 2>/dev/null || true
     if [ -s "$tmpf" ]; then
         cat "$tmpf"
@@ -327,7 +336,8 @@ read_idle_state() {
 read_retry_state() {
     local name=$1 agent_id=$2
     local retry_file="agent_logs/retry_agent_${agent_id}"
-    local tmpf="/tmp/.swarm-retry-${name}"
+    local tmpf
+    tmpf=$(mktemp "$RUNTIME_DIR/retry.XXXXXX")
     docker cp "${name}:/workspace/${retry_file}" "$tmpf" 2>/dev/null || true
     if [ -s "$tmpf" ]; then
         cat "$tmpf"
@@ -360,7 +370,8 @@ interactive_container_names() {
 
 read_interactive_state_value() {
     local name="$1" key="$2"
-    local tmpf="/tmp/.swarm-interactive-${name}.state"
+    local tmpf
+    tmpf=$(mktemp "$RUNTIME_DIR/interactive-state.XXXXXX")
     docker cp "${name}:/workspace/agent_logs/interactive_state" \
         "$tmpf" 2>/dev/null || true
     if [ ! -s "$tmpf" ]; then
@@ -442,8 +453,7 @@ emit_header() {
 draw() {
     # Re-read state file so display updates on every refresh.
     if [ -f "$STATE_FILE" ]; then
-        # shellcheck disable=SC1090
-        source "$STATE_FILE"
+        load_state || true
         DASHBOARD_TITLE="${USER_TITLE:-${SWARM_TITLE:-${DEFAULT_TITLE}}}"
         NUM_AGENTS="${SWARM_NUM_AGENTS:-$NUM_AGENTS}"
         MODEL_SUMMARY="${SWARM_MODEL_SUMMARY:-$MODEL_SUMMARY}"
