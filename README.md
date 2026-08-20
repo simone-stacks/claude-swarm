@@ -65,6 +65,12 @@ human-guided driver UI or shell on a separate
 `swarm/<run>/interactive-*` branch. `harvest.sh` merges those
 branches explicitly alongside `agent-work`.
 
+Embedders should use `control.sh`, not internal script paths. Its
+`claude-swarm.control/v1` JSON operations report capabilities, paths, and
+containers; lifecycle operations delegate to the engine version that owns the
+control file. Recursive submodules and their actual Git directories are
+discovered at runtime, so moving a gitlink does not require an embedder patch.
+
 Host-side state -- the bare repo, submodule mirrors, locks, and the
 dashboard state file -- lives below one owner-only (mode 0700) runtime
 directory instead of predictable top-level `/tmp` paths. The runtime
@@ -79,6 +85,10 @@ collision-free validation.
 ```bash
 # Create a swarmfile and launch numbered agents.
 SWARM_CONFIG=swarm.json ./launch.sh start --dashboard
+
+# Stable machine interface for an embedding tool.
+./control.sh capabilities
+./control.sh paths
 
 # Later, after agents are running or have exited:
 SWARM_CONFIG=swarm.json ./launch.sh wait

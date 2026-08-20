@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Versioned control plane.** `control.sh` reports capabilities,
+  paths, project identity, and labeled container metadata as
+  `claude-swarm.control/v1` / `claude-swarm.containers/v1` JSON, and
+  delegates validate, start, stop, harvest, status, dashboard, and
+  post-process to the engine that owns it. `launch.sh validate`
+  checks prompts, driver existence, and per-profile credentials
+  through each driver's auth resolver before any image build. Kimi
+  falls back to `KIMI_MODEL_API_KEY`, and a host
+  `ANTHROPIC_AUTH_TOKEN` now reports the `token` auth label.
 - **Fail-closed bare-repo and container lifecycle.** Replacing the
   bare repo is transactional (built aside, fsck'd, swapped with
   rollback) and refused while any `agent-work`/`swarm` ref tip is not

@@ -190,10 +190,12 @@ agent_docker_auth() {
     elif [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
         printf -- '-e\nANTHROPIC_BASE_URL=%s\n' "$ANTHROPIC_BASE_URL"
     fi
-    [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] \
-        && printf -- '-e\nANTHROPIC_AUTH_TOKEN=%s\n' "$ANTHROPIC_AUTH_TOKEN"
-
     local resolved_key="" label=""
+    if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+        printf -- '-e\nANTHROPIC_AUTH_TOKEN=%s\n' \
+            "$ANTHROPIC_AUTH_TOKEN"
+        label="token"
+    fi
     if [ -n "$auth_token" ]; then
         printf -- '-e\nANTHROPIC_AUTH_TOKEN=%s\n' "$auth_token"
         label="token"

@@ -138,4 +138,11 @@ Drafting the PR:
   style otherwise (capitalization, length, trailing period)
   is guidance, not enforcement -- see "Commit messages".
 
+## Embedding contract
+
+- External orchestration uses `control.sh` and versioned JSON schemas.
+- Do not expose a nested script path as an integration contract.
+- Add capabilities before changing lifecycle behavior or runtime paths.
+- Runtime replacement stays private, transactional, and rescue-first.
+
 <!-- CANARY: 114c1e52b479dc2795c42b655f73a15fd26d747d -->

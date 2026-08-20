@@ -16,6 +16,10 @@ All configuration lives in the swarmfile (JSON).  Place a
 ## Commands
 
 ```bash
+./control.sh capabilities            # Versioned machine contract.
+./control.sh paths                   # Project/runtime paths as JSON.
+./control.sh containers              # Engine containers as JSON.
+./control.sh validate                # Config, drivers, and auth.
 ./launch.sh start [--dashboard]   # Launch numbered agents.
 ./launch.sh stop                  # Stop all agents.
 ./launch.sh status                # Show containers.
@@ -61,6 +65,8 @@ Per-group credentials (`api_key`, `auth_token`, `base_url`)
 are set in the swarmfile.  Use `$VAR` references to pull
 values from the host environment without hardcoding secrets.
 
+`control.sh validate` checks every profile through the pinned driver's auth
+resolver and fails before image build if any profile cannot authenticate.
 Agent/provider credentials necessarily enter their agent container; the
 repository reader token does not. Setup runs with temporary sudo access, which
 the harness revokes before the model session starts.
