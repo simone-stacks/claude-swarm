@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Host-side target mirrors.** `TARGET_REPO`@`TARGET_REV` is resolved
+  once on the host into a private mirror mounted read-only at
+  `/target-upstream`; the optional `SWARM_READER_TOKEN` travels only
+  through a temporary `GIT_ASKPASS` script and never enters a container.
+  Target/base provenance and mirror paths are engine-owned: conflicting
+  swarmfile `docker_args` are filtered. Setup-time passwordless sudo is
+  revoked before model sessions start.
+- **Recursive submodule mirrors.** Host discovery requires every
+  recursive submodule initialized at its pinned gitlink, mirrors each
+  one into a transactionally swapped tree, and records a
+  `mirrors/manifest.tsv`. Containers initialize nested submodules
+  breadth-first from that one read-only manifest-driven tree.
 - **Private runtime.** Bare repository, submodule mirrors, locks,
   and dashboard state live below one mode-0700 runtime directory
   instead of predictable top-level `/tmp` paths. Local state defaults

@@ -38,7 +38,8 @@ Or clone standalone and run from your project directory
 ```
 Host                         private project runtime (0700)
 ~/project/ ── git clone ──>  upstream.git (rw)
-               --bare        mirrors/*.git (ro)
+               --bare        mirrors/ (ro)
+target repo ── mirror ─────> target.git (ro, one resolved SHA)
                                         |
                                         | docker volumes
                                         |
@@ -46,7 +47,8 @@ Host                         private project runtime (0700)
                  |           |          |           |
            Container 1            Container 2       ...
            /upstream  (rw)        /upstream  (rw)
-           /mirrors/* (ro)        /mirrors/* (ro)
+           /mirrors   (ro)        /mirrors   (ro)
+           /target-upstream (ro)  /target-upstream (ro)
                  |                      |
                  v                      v
            /workspace/            /workspace/

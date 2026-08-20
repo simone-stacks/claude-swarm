@@ -140,6 +140,66 @@ assert_eq "terminal failure is logged once" "1" \
         "$ERROR_LOG")"
 
 echo ""
+echo "=== 4. Recursive mirror manifest initializes nested submodules ==="
+
+LEAF="$TMPDIR/leaf"
+LEAF_BARE="$TMPDIR/leaf.git"
+MIDDLE="$TMPDIR/middle"
+MIDDLE_BARE="$TMPDIR/middle.git"
+ROOT="$TMPDIR/root"
+ROOT_BARE="$TMPDIR/root.git"
+NESTED_CLONE="$TMPDIR/nested-clone"
+MIRRORS="$TMPDIR/mirrors"
+export GIT_ALLOW_PROTOCOL=file
+
+git init -q "$LEAF"
+git -C "$LEAF" -c user.name=test -c user.email=test@example.com \
+    -c commit.gpgsign=false commit -q --allow-empty -m leaf
+printf 'leaf\n' > "$LEAF/leaf.txt"
+git -C "$LEAF" add leaf.txt
+git -C "$LEAF" -c user.name=test -c user.email=test@example.com \
+    -c commit.gpgsign=false commit -q -m content
+git clone -q --bare "$LEAF" "$LEAF_BARE"
+
+git init -q "$MIDDLE"
+git -C "$MIDDLE" submodule add -q \
+    "$LEAF_BARE" vendor/leaf
+git -C "$MIDDLE" add .
+git -C "$MIDDLE" -c user.name=test -c user.email=test@example.com \
+    -c commit.gpgsign=false commit -qm middle
+git clone -q --bare "$MIDDLE" "$MIDDLE_BARE"
+
+git init -q "$ROOT"
+git -C "$ROOT" submodule add -q \
+    "$MIDDLE_BARE" deps/middle
+git -C "$ROOT" add .
+git -C "$ROOT" -c user.name=test -c user.email=test@example.com \
+    -c commit.gpgsign=false commit -qm root
+git clone -q --bare "$ROOT" "$ROOT_BARE"
+git clone -q "$ROOT_BARE" "$NESTED_CLONE"
+
+mkdir -p "$MIRRORS/repos"
+git clone -q --bare "$MIDDLE_BARE" "$MIRRORS/repos/repo-1.git"
+git clone -q --bare "$LEAF_BARE" "$MIRRORS/repos/repo-2.git"
+printf '%s\t%s\n' \
+    'deps/middle' 'repos/repo-1.git' \
+    'deps/middle/vendor/leaf' 'repos/repo-2.git' \
+    > "$MIRRORS/manifest.tsv"
+
+swarm_init_mirrored_submodules \
+    "$NESTED_CLONE" "$MIRRORS"
+assert_eq "top-level mirrored submodule initialized" "true" \
+    "$(git -C "$NESTED_CLONE/deps/middle" rev-parse --is-inside-work-tree \
+        2>/dev/null || echo false)"
+assert_eq "nested mirrored submodule initialized" "true" \
+    "$([ -f "$NESTED_CLONE/deps/middle/vendor/leaf/leaf.txt" ] \
+        && echo true || echo false)"
+assert_eq "nested origin points at its manifest mirror" \
+    "$MIRRORS/repos/repo-2.git" \
+    "$(git -C "$NESTED_CLONE/deps/middle" \
+        config submodule.vendor/leaf.url)"
+
+echo ""
 echo "==============================="
 echo "  ${PASS} passed, ${FAIL} failed"
 echo "==============================="
