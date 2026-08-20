@@ -143,19 +143,69 @@ build_image() {
         -f "$SWARM_DIR/Dockerfile" "$SWARM_DIR"
 }
 
+assert_existing_bare_contained() {
+    [ -e "$BARE_REPO" ] || return 0
+    [ ! -L "$BARE_REPO" ] && [ -d "$BARE_REPO" ] \
+        && git -C "$BARE_REPO" rev-parse --git-dir >/dev/null 2>&1 || {
+        echo "ERROR: existing bare path is not a readable repository." >&2
+        return 1
+    }
+
+    local ref tip
+    while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        tip=$(git -C "$BARE_REPO" rev-parse --verify "${ref}^{commit}") \
+            || return 1
+        if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$tip" HEAD \
+                2>/dev/null; then
+            echo "ERROR: existing bare repository has an unharvested ref:" \
+                >&2
+            echo "       $ref (${tip:0:12}); harvest or rescue it first." >&2
+            return 1
+        fi
+    done < <(git -C "$BARE_REPO" for-each-ref --format='%(refname)' \
+        refs/heads/agent-work refs/heads/swarm)
+}
+
 create_bare_repo() {
-    local label="${1:-bare repo}"
+    local label="${1:-bare repo}" new old had_old=0
+    assert_existing_bare_contained || return 1
     echo "--- Creating ${label} ---"
-    safe_runtime_remove "$BARE_REPO"
+    new="$RUNTIME_DIR/.upstream.new.$$"
+    old="$RUNTIME_DIR/.upstream.previous.$$"
+    [ ! -e "$new" ] && [ ! -e "$old" ] || {
+        echo "ERROR: bare-repo transaction path already exists." >&2
+        return 1
+    }
     # Local clones hardlink packed objects by default. The bare repo is mounted
     # through Docker Desktop while the source stays on the host. Keep its
     # object storage independent so receive-pack does not depend on inodes
     # shared across the bind-mount boundary.
-    git clone --bare --no-hardlinks "$REPO_ROOT" "$BARE_REPO"
-    git -C "$BARE_REPO" branch agent-work HEAD 2>/dev/null || true
-    git -C "$BARE_REPO" symbolic-ref HEAD refs/heads/agent-work
-    git -C "$BARE_REPO" config core.sharedRepository world
-    chmod -R a+rwX "$BARE_REPO"
+    git clone --bare --no-hardlinks "$REPO_ROOT" "$new"
+    git -C "$new" branch agent-work HEAD 2>/dev/null || true
+    git -C "$new" symbolic-ref HEAD refs/heads/agent-work
+    git -C "$new" config core.sharedRepository false
+    chmod -R u+rwX,go-rwx "$new"
+    git -C "$new" fsck --no-dangling >/dev/null || {
+        safe_runtime_remove "$new"
+        echo "ERROR: new bare repository failed fsck." >&2
+        return 1
+    }
+    if [ -e "$BARE_REPO" ]; then
+        [ ! -L "$BARE_REPO" ] && [ -d "$BARE_REPO" ] || {
+            safe_runtime_remove "$new"
+            echo "ERROR: existing bare path is not a directory." >&2
+            return 1
+        }
+        mv "$BARE_REPO" "$old"
+        had_old=1
+    fi
+    if ! mv "$new" "$BARE_REPO"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$BARE_REPO"
+        safe_runtime_remove "$new" 2>/dev/null || true
+        return 1
+    fi
+    [ "$had_old" -eq 0 ] || safe_runtime_remove "$old"
 }
 
 ensure_bare_repo_for_interactive() {
@@ -170,12 +220,9 @@ ensure_bare_repo_for_interactive() {
     local_head=$(git rev-parse HEAD 2>/dev/null || true)
     if [ -n "$bare_head" ] && [ "$bare_head" != "$local_head" ] \
             && git merge-base --is-ancestor "$bare_head" HEAD 2>/dev/null; then
-        echo "ERROR: ${BARE_REPO} is stale (agent-work" \
-             "${bare_head:0:7} behind local HEAD" \
-             "${local_head:0:7})." >&2
-        echo "       Remove it to start from current HEAD:" >&2
-        echo "       rm -rf ${BARE_REPO}" >&2
-        exit 1
+        echo "--- Refreshing contained bare repo from current HEAD ---"
+        create_bare_repo "bare repo for interactive session"
+        return
     fi
 }
 
@@ -640,12 +687,19 @@ HELP
         done < <(agent_docker_env "$agent_effort")
     fi
 
-    docker rm -f "$name" 2>/dev/null || true
+    if docker inspect "$name" >/dev/null 2>&1; then
+        echo "ERROR: container $name already exists; rescue and remove it explicitly." >&2
+        exit 1
+    fi
 
     echo "--- Starting interactive ${profile_label} (${agent_model}) ---"
     echo "Branch: ${branch}"
     docker run -it \
         --name "$name" \
+        --label "org.claude-swarm.managed=true" \
+        --label "org.claude-swarm.project=${PROJECT}" \
+        --label "org.claude-swarm.engagement=${ENGAGEMENT_ID:-interactive}" \
+        --label "org.claude-swarm.role=interactive" \
         -v "${BARE_REPO}:/upstream:rw" \
         "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
         "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
@@ -703,38 +757,21 @@ cmd_start() {
         fi
     done <<< "$group_prompts"
 
-    # Refuse to overwrite a bare repo that diverges from local HEAD.
-    # Distinguish two directions so the message leads with the remediation
-    # that actually works.  The `--is-ancestor` check runs in the local
-    # repo, not in the bare: in the "local ahead" case LOCAL_HEAD is not
-    # in the bare's object db, so running the check in the bare would
-    # always return non-zero and collapse the stale case into the
-    # unharvested branch.  Running in local works across all three cases
-    # because bare's objects are either (a) still in local (inherited at
-    # clone time, so ancestry is resolvable -> stale) or (b) only in
-    # bare (agent-produced post-clone, so BARE_HEAD errors out here ->
-    # unharvested, which also catches the truly-divergent case).
-    if [ -d "$BARE_REPO" ]; then
-        BARE_HEAD=$(git -C "$BARE_REPO" rev-parse --verify --quiet refs/heads/agent-work 2>/dev/null || true)
-        LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
-        if [ -n "$BARE_HEAD" ] && [ "$BARE_HEAD" != "$LOCAL_HEAD" ]; then
-            if git merge-base --is-ancestor "$BARE_HEAD" HEAD 2>/dev/null; then
-                echo "ERROR: ${BARE_REPO} is stale (agent-work" \
-                     "${BARE_HEAD:0:7} behind local HEAD" \
-                     "${LOCAL_HEAD:0:7})." >&2
-                echo "       Remove it to start a fresh run from" \
-                     "current HEAD:" >&2
-                echo "       rm -rf ${BARE_REPO}" >&2
-            else
-                echo "ERROR: ${BARE_REPO} has unharvested agent" \
-                     "commits (agent-work ${BARE_HEAD:0:7} vs local" \
-                     "HEAD ${LOCAL_HEAD:0:7})." >&2
-                echo "       Run harvest.sh first, or if you've" \
-                     "already integrated those commits:" >&2
-                echo "       rm -rf ${BARE_REPO}" >&2
-            fi
-            exit 1
-        fi
+    local existing_containers
+    existing_containers=$(docker ps -a \
+        --filter "label=org.claude-swarm.project=${PROJECT}" \
+        --format '{{.Names}}' 2>/dev/null || true)
+    # Backward-compatible detection protects containers made before labels
+    # existed as well. No start path is allowed to erase forensic state.
+    if [ -z "$existing_containers" ]; then
+        existing_containers=$(docker ps -a \
+            --filter "name=^${IMAGE_NAME}-" --format '{{.Names}}' \
+            2>/dev/null || true)
+    fi
+    if [ -n "$existing_containers" ]; then
+        echo "ERROR: existing project containers must be rescued and removed explicitly:" >&2
+        printf '%s\n' "$existing_containers" | sed 's/^/  /' >&2
+        exit 1
     fi
 
     prepare_target_mirrors
@@ -777,7 +814,10 @@ cmd_start() {
     while IFS='|' read -r agent_model agent_base_url agent_api_key agent_effort agent_auth agent_context agent_prompt agent_auth_token agent_tag agent_driver; do
         AGENT_IDX=$((AGENT_IDX + 1))
         NAME="${IMAGE_NAME}-${AGENT_IDX}"
-        docker rm -f "$NAME" 2>/dev/null || true
+        if docker inspect "$NAME" >/dev/null 2>&1; then
+            echo "ERROR: container $NAME already exists; rescue and remove it explicitly." >&2
+            exit 1
+        fi
         agent_api_key="$(expand_env_ref "$agent_api_key")"
         agent_auth_token="$(expand_env_ref "$agent_auth_token")"
         agent_tag="$(expand_env_ref "$agent_tag")"
@@ -819,6 +859,11 @@ cmd_start() {
 
         docker run -d \
             --name "$NAME" \
+            --label "org.claude-swarm.managed=true" \
+            --label "org.claude-swarm.project=${PROJECT}" \
+            --label "org.claude-swarm.engagement=${ENGAGEMENT_ID:-unknown}" \
+            --label "org.claude-swarm.role=agent" \
+            --label "org.claude-swarm.agent-index=${AGENT_IDX}" \
             -v "${BARE_REPO}:/upstream:rw" \
             "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
             "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \
@@ -1046,7 +1091,10 @@ cmd_post_process() {
     build_image
 
     local NAME="${IMAGE_NAME}-post"
-    docker rm -f "$NAME" 2>/dev/null || true
+    if docker inspect "$NAME" >/dev/null 2>&1; then
+        echo "ERROR: container $NAME already exists; rescue and remove it explicitly." >&2
+        return 1
+    fi
 
     # Mount the read-only mirror tree from existing mirrors.
     local MIRROR_ARGS=()
@@ -1079,6 +1127,10 @@ cmd_post_process() {
     echo "--- Starting post-processing (${pp_model}) ---"
     docker run -d \
         --name "$NAME" \
+        --label "org.claude-swarm.managed=true" \
+        --label "org.claude-swarm.project=${PROJECT}" \
+        --label "org.claude-swarm.engagement=${ENGAGEMENT_ID:-unknown}" \
+        --label "org.claude-swarm.role=post-process" \
         -v "${BARE_REPO}:/upstream:rw" \
         "${MIRROR_ARGS[@]+"${MIRROR_ARGS[@]}"}" \
         "${TARGET_MIRROR_ARGS[@]+"${TARGET_MIRROR_ARGS[@]}"}" \

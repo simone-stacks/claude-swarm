@@ -119,9 +119,8 @@ for branch in "${HARVEST_BRANCHES[@]}"; do
         echo "the bare repo still has the old ancestry. Merging" >&2
         echo "would re-introduce removed commits." >&2
         echo "" >&2
-        echo "Resolve by wiping and recreating the bare repo:" >&2
-        echo "  rm -rf ${BARE_REPO}" >&2
-        echo "  ./launch.sh ...   # recreates the bare from current HEAD" >&2
+        echo "Preserve the runtime and resolve the ancestry explicitly;" >&2
+        echo "the engine will not delete or merge divergent state." >&2
         git remote remove "$REMOTE_NAME"
         exit 1
     fi

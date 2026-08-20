@@ -457,9 +457,9 @@ assert_eq "guard names short HEAD in diagnostic" "true" \
     "$(printf '%s\n' "$guard_output" \
         | grep -qE "HEAD:[[:space:]]+${HEAD_BEFORE:0:7}" \
         && echo true || echo false)"
-assert_eq "guard names the bare path in remediation" "true" \
+assert_eq "guard refuses destructive remediation" "true" \
     "$(printf '%s\n' "$guard_output" \
-        | grep -qF "rm -rf ${GUARD_BARE}" \
+        | grep -qF 'engine will not delete or merge divergent state' \
         && echo true || echo false)"
 assert_eq "no merge commit produced" "$HEAD_BEFORE" "$HEAD_AFTER"
 assert_eq "_agent-harvest remote cleaned up after failure" "" \
