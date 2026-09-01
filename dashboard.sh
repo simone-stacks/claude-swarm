@@ -48,8 +48,8 @@ source "$SWARM_DIR/lib/project.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PROJECT_RAW="$(basename "$REPO_ROOT")"
-PROJECT="$(swarm_project_id "$PROJECT_RAW")"
-RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+PROJECT="$(swarm_project_resolve "$REPO_ROOT")"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT" "$REPO_ROOT")"
 BARE_REPO="$RUNTIME_DIR/upstream.git"
 IMAGE_NAME="${PROJECT}-agent"
 START_TIME=$(date +%s)

@@ -21,8 +21,8 @@ check_deps git docker
 source "$SWARM_DIR/lib/project.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-PROJECT="$(swarm_project_id "$(basename "$REPO_ROOT")")"
-RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+PROJECT="$(swarm_project_resolve "$REPO_ROOT")"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT" "$REPO_ROOT")"
 BARE_REPO="$RUNTIME_DIR/upstream.git"
 CHECK_DIR="$RUNTIME_DIR/progress-check"
 

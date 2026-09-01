@@ -8,10 +8,12 @@ source "$SWARM_DIR/lib/project.sh"
 
 usage() {
     cat <<'HELP'
-Usage: control.sh <capabilities|paths|project-id|containers|validate|start|stop|harvest|status|dashboard>
+Usage: control.sh <capabilities|paths|project-id|containers|init|validate|start|stop|harvest|status|dashboard|post-process|cleanup>
 
-The JSON commands are side-effect free. Lifecycle commands delegate to the
-engine version that owns this control script.
+The query commands (capabilities, paths, project-id, containers) are
+side-effect free. init is the documented exception: it creates the
+runtime directory and may migrate legacy /tmp state. Lifecycle commands
+delegate to the engine version that owns this control script.
 HELP
 }
 
@@ -31,16 +33,21 @@ repo_root() {
 }
 
 project_id() {
-    swarm_project_id "$(basename "$(repo_root)")"
+    swarm_project_resolve "$(repo_root)"
 }
 
 json_paths() {
-    local initialize="${1:-0}" project runtime
+    local initialize="${1:-0}" project runtime engagement=""
     project=$(project_id)
     if [ "$initialize" = 1 ]; then
-        runtime=$(swarm_runtime_init "$project")
+        runtime=$(swarm_runtime_init "$project" "$(repo_root)")
     else
         runtime=$(swarm_runtime_dir "$project")
+    fi
+    # Pure read: a missing or unreadable state file reports null.
+    if [ -r "$runtime/swarm-state.json" ]; then
+        engagement=$(jq -r '.engagement // empty' \
+            "$runtime/swarm-state.json" 2>/dev/null || true)
     fi
     jq -n \
         --arg schema "claude-swarm.control/v1" \
@@ -53,11 +60,13 @@ json_paths() {
         --arg image "${project}-agent" \
         --arg control "$SWARM_DIR/control.sh" \
         --arg engine "$SWARM_DIR" \
+        --arg engagement "$engagement" \
         '{schema:$schema, project:$project, runtime_dir:$runtime,
           bare_repo:$bare, lock_file:$lock, state_file:$state,
           mirror_dir:$mirrors, image_name:$image,
           container_prefix:($image + "-"), control_path:$control,
-          engine_dir:$engine}'
+          engine_dir:$engine,
+          engagement:($engagement | if length > 0 then . else null end)}'
 }
 
 project_containers() {
@@ -156,7 +165,7 @@ case "${1:-}" in
             '{schema:$schema, version:$version,
               operations:["paths","init","project-id","containers","start","stop",
                           "validate","harvest","status","dashboard",
-                          "post-process"],
+                          "post-process","cleanup"],
               features:["private-runtime-v1","recursive-submodules-v1",
                         "signed-agent-commits-v1","rescue-first-replace-v1",
                         "shared-target-snapshot-v1","reader-token-host-only-v1",
@@ -173,6 +182,7 @@ case "${1:-}" in
     status) shift; status_project "$@" ;;
     dashboard) shift; cd "$(repo_root)"; exec "$SWARM_DIR/dashboard.sh" "$@" ;;
     post-process) shift; cd "$(repo_root)"; exec "$SWARM_DIR/launch.sh" post-process "$@" ;;
+    cleanup) shift; cd "$(repo_root)"; exec "$SWARM_DIR/launch.sh" cleanup "$@" ;;
     -h|--help|"") usage ;;
     *) echo "control.sh: unknown operation: $1" >&2; usage >&2; exit 2 ;;
 esac

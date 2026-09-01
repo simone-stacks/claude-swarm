@@ -22,7 +22,8 @@ echo "=== Versioned control contract ==="
 caps=$(CLAUDE_SWARM_MIGRATE_LEGACY=0 "$SWARM_DIR/control.sh" capabilities)
 assert_eq "schema" claude-swarm.control/v1 \
     "$(jq -r .schema <<< "$caps")"
-jq -e '.operations | index("validate") and index("start") and index("harvest")' \
+jq -e '.operations | index("validate") and index("start") and index("harvest")
+    and index("cleanup")' \
     >/dev/null <<< "$caps"
 ok "required lifecycle operations advertised"
 

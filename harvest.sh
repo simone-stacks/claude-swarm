@@ -11,8 +11,8 @@ check_deps git
 source "$SWARM_DIR/lib/project.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-PROJECT="$(swarm_project_id "$(basename "$REPO_ROOT")")"
-RUNTIME_DIR="$(swarm_runtime_init "$PROJECT")"
+PROJECT="$(swarm_project_resolve "$REPO_ROOT")"
+RUNTIME_DIR="$(swarm_runtime_init "$PROJECT" "$REPO_ROOT")"
 BARE_REPO="$RUNTIME_DIR/upstream.git"
 REMOTE_NAME="_agent-harvest"
 DRY_RUN=false
@@ -72,6 +72,11 @@ warn_dirty_interactive_containers() {
         | grep -E "^${image_name}-interactive-" \
         | sort || true)
 }
+
+# Serialize with concurrent lifecycle mutations. When invoked as a child
+# of launch.sh (wait, post-process) the exported SWARM_ENGAGEMENT_LOCK_HELD
+# makes this a no-op against the parent's lock.
+swarm_engagement_lock "$RUNTIME_DIR"
 
 if [ ! -d "$BARE_REPO" ]; then
     echo "ERROR: ${BARE_REPO} not found." >&2

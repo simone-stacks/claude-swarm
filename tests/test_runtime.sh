@@ -49,14 +49,21 @@ legacy_bare="$legacy_tmp/${project}-upstream.git"
 legacy_state="$legacy_tmp/${project}-swarm.env"
 legacy_lock="$legacy_tmp/${project}-engagement.lock"
 legacy_mirror="$legacy_tmp/${project}-mirror-nested.git"
-mkdir -p "$legacy_bare" "$legacy_mirror"
-printf 'sentinel\n' > "$legacy_bare/keep"
+legacy_source="$TMPROOT/legacy-source"
+# Migration fsck-gates the legacy bare, so the fixture must be a real
+# repository rather than a plain directory.
+git init -q "$legacy_source"
+git -C "$legacy_source" -c user.name=test -c user.email=t@t \
+    -c commit.gpgsign=false commit -q --allow-empty -m init
+git clone -q --bare "$legacy_source" "$legacy_bare"
+mkdir -p "$legacy_mirror"
 printf 'state\n' > "$legacy_state"
 : > "$legacy_lock"
 migrated="$TMPROOT/migrated"
 TMPDIR="$legacy_tmp" CLAUDE_SWARM_RUNTIME_DIR="$migrated" \
     swarm_runtime_init "$project" >/dev/null
-[ -f "$migrated/upstream.git/keep" ] && ok "bare repository preserved"
+git -C "$migrated/upstream.git" rev-parse --git-dir >/dev/null \
+    && ok "bare repository preserved"
 [ -f "$migrated/legacy/swarm.env" ] && ok "legacy state retained without sourcing"
 [ -f "$migrated/engagement.lock" ] && ok "unlocked lock migrated"
 [ -d "$migrated/legacy/$(basename "$legacy_mirror")" ] \

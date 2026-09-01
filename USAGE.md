@@ -18,10 +18,15 @@ All configuration lives in the swarmfile (JSON).  Place a
 ```bash
 ./control.sh capabilities            # Versioned machine contract.
 ./control.sh paths                   # Project/runtime paths as JSON.
+./control.sh init                    # Create the runtime; may migrate
+                                     # legacy /tmp state. Not
+                                     # side-effect free (the other
+                                     # queries are).
 ./control.sh containers              # Engine containers as JSON.
 ./control.sh validate                # Config, drivers, and auth.
 ./launch.sh start [--dashboard]   # Launch numbered agents.
 ./launch.sh stop                  # Stop all agents.
+./launch.sh cleanup               # Remove stopped containers.
 ./launch.sh status                # Show containers.
 ./launch.sh logs N                # Tail agent N logs.
 ./launch.sh wait                  # Wait for already-started
@@ -52,13 +57,15 @@ Credentials stay as env vars (not in shell history).
 | `QWEN_HOME` | `~/.qwen` | Path to Qwen home dir (login state and `settings.json`). |
 | `SWARM_CONFIG` | | Path to swarmfile (or place `swarm.json` in repo root). |
 | `SWARM_TITLE` | | Dashboard title override. |
+| `ENGAGEMENT_ID` | | Engagement id override. When unset, `start` assigns one (`<utc>-<rand>`); recorded in the state file and the `org.claude-swarm.engagement` container label, and reused by a standalone `post-process`. |
 | `SWARM_SKIP_DEP_CHECK` | | Set to `1` to silence dependency version warnings. |
 | `SWARM_ACTIVITY_TIMEOUT` | `0` | Seconds of logfile silence before the in-container watchdog SIGTERMs the agent CLI's process group.  `0` disables.  See [Activity watchdog](#activity-watchdog). |
 | `SWARM_ACTIVITY_POLL` | `10` | Watchdog mtime-poll interval, in seconds.  Rarely needs tuning. |
 | `SWARM_WATCHDOG_GRACE` | `10` | Grace window between watchdog SIGTERM and SIGKILL.  Rarely needs tuning. |
 | `SWARM_STOP_TIMEOUT` | `60` | Seconds `./launch.sh stop` passes to `docker stop -t`, so the harness's SIGTERM trap has time to ship any in-flight local commits via `_session_end_push` before SIGKILL hits.  See [Stopping the swarm](#stopping-the-swarm). |
 | `CLAUDE_SWARM_RUNTIME_DIR` | `$XDG_STATE_HOME/claude-swarm/<project>` | Absolute owner-only (mode 0700) runtime override. Holds the bare repo, submodule mirrors, locks, and dashboard state. |
-| `TARGET_REPO`, `TARGET_REV` | | Optional audit target. The host resolves one private read-only mirror and passes the same commit to every container. |
+| `SWARM_ENGAGEMENT_LOCK_HELD` | | Embedders: set to `1` while holding the runtime's `engagement.lock` so delegated engine commands skip re-acquisition. |
+| `TARGET_REPO`, `TARGET_REV` | | Optional audit target. The host resolves one private read-only mirror and passes the same commit to every container. The resolved commit is recorded in the state file; later phases reuse that snapshot instead of re-resolving a moving ref, and a conflicting pinned commit fails closed. |
 | `SWARM_READER_TOKEN` | | Host-only credential for an HTTPS target mirror; removed from Docker arguments. |
 
 Per-group credentials (`api_key`, `auth_token`, `base_url`)
@@ -70,6 +77,11 @@ resolver and fails before image build if any profile cannot authenticate.
 Agent/provider credentials necessarily enter their agent container; the
 repository reader token does not. Setup runs with temporary sudo access, which
 the harness revokes before the model session starts.
+
+On native Linux the image build pins the container's `agent` uid/gid to the
+host (`id -u`/`id -g`, passed as the `AGENT_UID`/`AGENT_GID` build args) so
+the owner-only bind-mounted runtime stays writable inside the container.
+Docker Desktop remaps ownership, so the default 1000 is harmless there.
 
 ## Config file fields
 
@@ -934,14 +946,19 @@ After a swarm run, the following artifacts remain on disk:
 
 The runtime is `$XDG_STATE_HOME/claude-swarm/<project>` by default
 (`$HOME/.local/state/claude-swarm/<project>` when XDG is unset), or
-`$CLAUDE_SWARM_RUNTIME_DIR` when overridden.
+`$CLAUDE_SWARM_RUNTIME_DIR` when overridden. Two checkouts with the
+same basename get distinct identities: the runtime records its owning
+root in a `repo-root` marker, and a colliding checkout resolves to a
+content-hashed `<project>-<hash>` id.
 
 Remove everything for a fresh start:
 
 ```bash
+./launch.sh cleanup   # removes stopped containers; refuses while any
+                      # is running or the bare repo holds unharvested
+                      # refs (harvest first)
 PROJECT=$(basename $(pwd))
 RUNTIME=${CLAUDE_SWARM_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-swarm/$PROJECT}
-docker rm -f $(docker ps -aq --filter "name=${PROJECT}-agent-") 2>/dev/null
 rm -rf "$RUNTIME"
 ```
 

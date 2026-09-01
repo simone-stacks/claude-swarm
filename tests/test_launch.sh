@@ -1857,6 +1857,25 @@ assert_eq "build_image forwards KIMI_CLI_VERSION build-arg" "1" \
 assert_eq "build_image forwards QWEN_CLI_VERSION build-arg" "1" \
     "$(printf '%s\n' "$_bi_body" \
         | grep -cE -- '--build-arg "QWEN_CLI_VERSION=' || true)"
+assert_eq "build_image pins the agent uid to the host" "1" \
+    "$(printf '%s\n' "$_bi_body" \
+        | grep -cE -- '--build-arg "AGENT_UID=\$\(id -u\)"' || true)"
+assert_eq "build_image pins the agent gid to the host" "1" \
+    "$(printf '%s\n' "$_bi_body" \
+        | grep -cE -- '--build-arg "AGENT_GID=\$\(id -g\)"' || true)"
+
+# The Dockerfile must consume both build args when creating the agent
+# user; a dropped ARG would silently revert to uid 1000 and break the
+# owner-only runtime on native Linux.
+_DOCKERFILE="$TESTS_DIR/../Dockerfile"
+assert_eq "Dockerfile declares AGENT_UID" "1" \
+    "$(grep -cE '^ARG AGENT_UID=' "$_DOCKERFILE")"
+assert_eq "Dockerfile declares AGENT_GID" "1" \
+    "$(grep -cE '^ARG AGENT_GID=' "$_DOCKERFILE")"
+assert_eq "Dockerfile creates the agent user with the pinned uid" "1" \
+    "$(grep -cE 'useradd .*-u "\$AGENT_UID"' "$_DOCKERFILE")"
+assert_eq "Dockerfile creates the agent group with the pinned gid" "1" \
+    "$(grep -cE 'groupadd -g "\$AGENT_GID"' "$_DOCKERFILE")"
 
 # ============================================================
 echo ""
@@ -2065,6 +2084,208 @@ assert_eq "cmd_post_process passes pp_setup to SWARM_SETUP" "1" \
 assert_eq "cmd_post_process passes pp_setup to SWARM_CFG_SETUP" "1" \
     "$(printf '%s\n' "$_pp_setup_body" \
         | grep -cF 'SWARM_CFG_SETUP=${pp_setup}' || true)"
+
+# ============================================================
+echo ""
+echo "=== 44. Project identity disambiguation ==="
+
+_id_state="$TMPDIR/xdg-state-identity"
+_id_root_a="$TMPDIR/parent-a/proj"
+_id_root_b="$TMPDIR/parent-b/proj"
+mkdir -p "$_id_root_a" "$_id_root_b"
+git -C "$_id_root_a" init -q
+git -C "$_id_root_b" init -q
+
+_id_resolve() {
+    env -u CLAUDE_SWARM_RUNTIME_DIR \
+        XDG_STATE_HOME="$_id_state" CLAUDE_SWARM_MIGRATE_LEGACY=0 \
+        bash -c 'source "$1/lib/project.sh" && swarm_project_resolve "$2"' \
+        _ "$TESTS_DIR/.." "$1"
+}
+_id_init() {
+    env -u CLAUDE_SWARM_RUNTIME_DIR \
+        XDG_STATE_HOME="$_id_state" CLAUDE_SWARM_MIGRATE_LEGACY=0 \
+        bash -c \
+        'source "$1/lib/project.sh" && swarm_runtime_init "$2" "$3" >/dev/null' \
+        _ "$TESTS_DIR/.." "$1" "$2"
+}
+
+_id_a=$(_id_resolve "$_id_root_a")
+_id_init "$_id_a" "$_id_root_a"
+_id_b=$(_id_resolve "$_id_root_b")
+_id_init "$_id_b" "$_id_root_b"
+assert_eq "first root keeps the base id" "proj" "$_id_a"
+assert_eq "same basename in different parents differs" "true" \
+    "$([ "$_id_a" != "$_id_b" ] && echo true || echo false)"
+assert_eq "re-resolving the same root is stable" "$_id_a" \
+    "$(_id_resolve "$_id_root_a")"
+assert_eq "second root re-resolves to its own id" "$_id_b" \
+    "$(_id_resolve "$_id_root_b")"
+
+# A hand-written mismatched marker fails runtime init closed.
+_id_root_c="$TMPDIR/parent-c/proj"
+mkdir -p "$_id_root_c"
+git -C "$_id_root_c" init -q
+if _id_init "$_id_a" "$_id_root_c" 2>/dev/null; then
+    echo "  FAIL: mismatched repo-root marker accepted"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: mismatched repo-root marker refused"
+    PASS=$((PASS + 1))
+fi
+
+# An explicit runtime override is an explicit identity assertion.
+_id_override=$(CLAUDE_SWARM_RUNTIME_DIR="$TMPDIR/override-runtime" \
+    bash -c 'source "$1/lib/project.sh" && swarm_project_resolve "$2"' \
+    _ "$TESTS_DIR/.." "$_id_root_b")
+assert_eq "runtime override asserts base identity" "proj" "$_id_override"
+
+# ============================================================
+echo ""
+echo "=== 45. Engagement lock serialization ==="
+
+if command -v flock >/dev/null 2>&1; then
+    _lock_runtime="$TMPDIR/lock-runtime"
+    mkdir -p "$_lock_runtime"
+    swarm_engagement_lock "$_lock_runtime"
+    assert_eq "lock acquired and marked held" "1" \
+        "${SWARM_ENGAGEMENT_LOCK_HELD:-0}"
+
+    # A child without the HELD marker must fail to take the held lock.
+    if env -u SWARM_ENGAGEMENT_LOCK_HELD bash -c \
+            'source "$1/lib/project.sh" && swarm_engagement_lock "$2"' \
+            _ "$TESTS_DIR/.." "$_lock_runtime" 2>/dev/null; then
+        echo "  FAIL: child acquired a held lock"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: held lock refuses a second acquirer"
+        PASS=$((PASS + 1))
+    fi
+
+    # The documented HELD convention lets a delegated child proceed.
+    if SWARM_ENGAGEMENT_LOCK_HELD=1 bash -c \
+            'source "$1/lib/project.sh" && swarm_engagement_lock "$2"' \
+            _ "$TESTS_DIR/.." "$_lock_runtime" 2>/dev/null; then
+        echo "  PASS: HELD marker short-circuits re-acquisition"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: HELD marker ignored"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # A symlinked lock path fails closed.
+    _lock_link_runtime="$TMPDIR/lock-link-runtime"
+    mkdir -p "$_lock_link_runtime"
+    ln -s "$TMPDIR/elsewhere" "$_lock_link_runtime/engagement.lock"
+    if env -u SWARM_ENGAGEMENT_LOCK_HELD bash -c \
+            'source "$1/lib/project.sh" && swarm_engagement_lock "$2"' \
+            _ "$TESTS_DIR/.." "$_lock_link_runtime" 2>/dev/null; then
+        echo "  FAIL: symlink lock accepted"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: symlink lock refused"
+        PASS=$((PASS + 1))
+    fi
+else
+    echo "  SKIP: flock not available"
+fi
+
+# ============================================================
+echo ""
+echo "=== 46. Legacy bare migration is fsck-gated ==="
+
+_mig_tmp="$TMPDIR/legacy-mig-tmp"
+_mig_state="$TMPDIR/legacy-mig-state"
+mkdir -p "$_mig_tmp"
+_mig_project="migfsck-$RANDOM"
+
+_mig_init() {
+    env -u CLAUDE_SWARM_RUNTIME_DIR \
+        TMPDIR="$_mig_tmp" XDG_STATE_HOME="$_mig_state" \
+        bash -c \
+        'source "$1/lib/project.sh" && swarm_runtime_init "$2" >/dev/null' \
+        _ "$TESTS_DIR/.." "$_mig_project"
+}
+
+# A non-git directory at the legacy bare path must stop migration and
+# leave the legacy path untouched.
+mkdir -p "$_mig_tmp/${_mig_project}-upstream.git"
+if _mig_init 2>/dev/null; then
+    echo "  FAIL: non-git legacy bare migrated"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: non-git legacy bare fails migration"
+    PASS=$((PASS + 1))
+fi
+assert_eq "legacy path left in place" "true" \
+    "$([ -d "$_mig_tmp/${_mig_project}-upstream.git" ] \
+        && echo true || echo false)"
+assert_eq "runtime did not adopt the fake bare" "false" \
+    "$([ -e "$_mig_state/claude-swarm/${_mig_project}/upstream.git" ] \
+        && echo true || echo false)"
+
+# A valid bare clone migrates.
+rm -rf "$_mig_tmp/${_mig_project}-upstream.git"
+_mig_src="$TMPDIR/legacy-mig-src"
+git init -q "$_mig_src"
+git -C "$_mig_src" -c user.name=t -c user.email=t@t \
+    -c commit.gpgsign=false commit -q --allow-empty -m init
+git clone -q --bare "$_mig_src" "$_mig_tmp/${_mig_project}-upstream.git"
+_mig_init
+assert_eq "valid legacy bare migrated" "true" \
+    "$([ -d "$_mig_state/claude-swarm/${_mig_project}/upstream.git" ] \
+        && echo true || echo false)"
+assert_eq "legacy bare path moved" "false" \
+    "$([ -e "$_mig_tmp/${_mig_project}-upstream.git" ] \
+        && echo true || echo false)"
+
+# ============================================================
+echo ""
+echo "=== 47. agent-parked salvage refs are protected ==="
+
+_ab_body=$(awk '
+    /^assert_existing_bare_contained\(\)[[:space:]]*\{/ { p = 1 }
+    p { print }
+    p && /^\}[[:space:]]*$/ { exit }
+' "$_LAUNCH_SH")
+assert_eq "containment guard scans agent-parked refs" "1" \
+    "$(printf '%s\n' "$_ab_body" \
+        | grep -cF 'refs/heads/agent-parked)' || true)"
+assert_eq "parked tips must exist in the local repo" "1" \
+    "$(printf '%s\n' "$_ab_body" \
+        | grep -cF 'cat-file -e "${tip}^{commit}"' || true)"
+
+# ============================================================
+echo ""
+echo "=== 48. cmd_cleanup refuses running containers before removing ==="
+
+_cc_body=$(awk '
+    /^cmd_cleanup\(\)[[:space:]]*\{/ { p = 1 }
+    p { print }
+    p && /^\}[[:space:]]*$/ { exit }
+' "$_LAUNCH_SH")
+_cc_running_line=$(printf '%s\n' "$_cc_body" \
+    | grep -nF 'is running; stop it first' | cut -d: -f1)
+_cc_rm_line=$(printf '%s\n' "$_cc_body" \
+    | grep -nF 'docker rm' | head -1 | cut -d: -f1)
+assert_eq "running check present" "true" \
+    "$([ -n "$_cc_running_line" ] && echo true || echo false)"
+assert_eq "removal present" "true" \
+    "$([ -n "$_cc_rm_line" ] && echo true || echo false)"
+assert_eq "running check precedes removal" "true" \
+    "$([ "$_cc_running_line" -lt "$_cc_rm_line" ] \
+        && echo true || echo false)"
+assert_eq "cleanup runs the bare containment guard" "1" \
+    "$(printf '%s\n' "$_cc_body" \
+        | grep -cF 'assert_existing_bare_contained' || true)"
+assert_eq "cleanup takes the engagement lock" "1" \
+    "$(awk '
+        /^    cleanup\)/ { p = 1 }
+        p { print }
+        p && /;;/ { exit }
+    ' "$_LAUNCH_SH" | grep -cF 'swarm_engagement_lock' || true)"
+assert_eq "control plane advertises cleanup" "1" \
+    "$(grep -cF '"cleanup"' "$TESTS_DIR/../control.sh")"
 
 # ============================================================
 echo ""

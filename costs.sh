@@ -34,7 +34,7 @@ check_deps git jq docker bc
 source "$SWARM_DIR/lib/project.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-PROJECT="$(swarm_project_id "$(basename "$REPO_ROOT")")"
+PROJECT="$(swarm_project_resolve "$REPO_ROOT")"
 IMAGE_NAME="${PROJECT}-agent"
 JSON_MODE=false
 
@@ -46,7 +46,7 @@ read_agent_stats() {
     local name=$1 agent_id=$2
     local stats_file="agent_logs/stats_agent_${agent_id}.tsv"
     local runtime tmpf
-    runtime=$(swarm_runtime_init "$PROJECT")
+    runtime=$(swarm_runtime_init "$PROJECT" "$REPO_ROOT")
     tmpf=$(mktemp "$runtime/stats.XXXXXX")
     docker cp "${name}:/workspace/${stats_file}" "$tmpf" 2>/dev/null || true
     if [ ! -s "$tmpf" ]; then

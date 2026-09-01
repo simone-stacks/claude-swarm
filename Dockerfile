@@ -13,7 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code refuses --dangerously-skip-permissions as root.
-RUN useradd -m -s /bin/bash agent \
+# The owner-only bind-mounted runtime requires the container uid/gid to
+# equal the host uid/gid on native Linux; launch.sh passes both as
+# build args. Docker Desktop remaps ownership, so the 1000 default is
+# harmless there.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+RUN groupadd -g "$AGENT_GID" agent 2>/dev/null || true; \
+    useradd -o -m -s /bin/bash -u "$AGENT_UID" -g "$AGENT_GID" agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
 USER agent
 

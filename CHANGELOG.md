@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+- **Control-plane doc clarity.** The `control.sh` usage text and the
+  manuals now state that only the query commands (`capabilities`,
+  `paths`, `project-id`, `containers`) are side-effect free; `init`
+  is the documented exception -- it creates the runtime directory and
+  may migrate legacy `/tmp` state.
+- **Salvage-ref protection and `cleanup`.** Bare replacement now also
+  checks `refs/heads/agent-parked/*`, the harness's emergency salvage
+  refs: their tips are not expected to be merged, so replacement is
+  refused until the objects exist in the local repo (a completed
+  harvest satisfies this). New `launch.sh cleanup` (and
+  `control.sh cleanup`) removes stopped project containers under the
+  engagement lock, refusing while any container is running or the bare
+  repo holds unharvested refs.
+- **Recorded target snapshot reuse.** `start` records the resolved
+  `target_rev`/`target_rev_base` (plus the base repo) in the state
+  file, and every later phase reuses that snapshot instead of
+  re-resolving a moving ref: an empty or non-commit `TARGET_REV`
+  yields to the recorded commit, a conflicting pinned commit or repo
+  fails closed, and an on-disk mirror that already holds the pinned
+  commit is not re-cloned. The mirror machinery moved to
+  `lib/target.sh` (`safe_runtime_remove` to `lib/project.sh`).
+- **Engine-assigned engagement id.** `start` assigns and exports
+  `ENGAGEMENT_ID` when the embedder did not set one, records it as
+  `engagement` in the `claude-swarm.state/v1` state file, and a
+  standalone `post-process` reads it back so container labels never
+  fall back to `unknown`. `control.sh paths` reports the recorded
+  engagement (`null` when no state file is readable).
+- **Fsck-gated legacy migration.** Migrating a legacy top-level
+  `/tmp/<project>-upstream.git` into the private runtime now verifies
+  it is a git repository and passes `git fsck --no-dangling` first;
+  ownership proves the directory, not its contents. A failed check
+  leaves every legacy path untouched.
+- **Host-pinned agent uid/gid.** The image build now takes
+  `AGENT_UID`/`AGENT_GID` build args (passed by `launch.sh` from
+  `id -u`/`id -g`) so the owner-only bind-mounted runtime stays
+  writable by the container's `agent` user on native Linux. Docker
+  Desktop remaps ownership, so the 1000 default is harmless there.
+- **Project identity disambiguation.** Two checkouts sharing a
+  basename no longer share a runtime, image, or container identity:
+  the runtime records its owning root in a `repo-root` marker
+  (atomically written by runtime init, fail-closed on mismatch), and
+  a colliding root resolves to a content-hashed `<base>-<hash>` id.
+  Setting `CLAUDE_SWARM_RUNTIME_DIR` remains an explicit identity
+  assertion and skips the marker entirely.
+- **Engagement lock enforcement.** `start`, `wait`, `post-process`,
+  `interactive`/`chat`/`shell`, and `harvest.sh` now take the
+  per-runtime `engagement.lock` (non-blocking `flock`) before mutating
+  lifecycle state, so two concurrent operations cannot race the
+  bare-repo or mirror replacement. `stop` (the emergency brake),
+  `logs`, `status`, and `validate` stay lock-free. An embedder that
+  already holds the lock exports `SWARM_ENGAGEMENT_LOCK_HELD=1` so
+  delegated engine commands do not deadlock on their parent's lock.
 - **Versioned control plane.** `control.sh` reports capabilities,
   paths, project identity, and labeled container metadata as
   `claude-swarm.control/v1` / `claude-swarm.containers/v1` JSON, and

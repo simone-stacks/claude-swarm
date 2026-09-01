@@ -67,16 +67,32 @@ branches explicitly alongside `agent-work`.
 
 Embedders should use `control.sh`, not internal script paths. Its
 `claude-swarm.control/v1` JSON operations report capabilities, paths, and
-containers; lifecycle operations delegate to the engine version that owns the
-control file. Recursive submodules and their actual Git directories are
-discovered at runtime, so moving a gitlink does not require an embedder patch.
+containers; the paths document also carries the engagement id recorded in
+the state file (`null` before the first start). The query operations are
+side-effect free; `init` is the documented exception -- it creates the
+runtime directory and may migrate legacy `/tmp` state. Lifecycle
+operations delegate to the engine version that owns the control file.
+Mutating lifecycle operations serialize on the runtime's
+`engagement.lock`; an embedder that already holds it exports
+`SWARM_ENGAGEMENT_LOCK_HELD=1` so delegated commands do not deadlock on
+their parent's lock. Recursive submodules and their actual Git directories
+are discovered at runtime, so moving a gitlink does not require an
+embedder patch.
 
 Host-side state -- the bare repo, submodule mirrors, locks, and the
 dashboard state file -- lives below one owner-only (mode 0700) runtime
 directory instead of predictable top-level `/tmp` paths. The runtime
 defaults to `$XDG_STATE_HOME/claude-swarm/<project>` (or
 `$HOME/.local/state/claude-swarm/<project>`); an absolute
-`CLAUDE_SWARM_RUNTIME_DIR` overrides it. Existing top-level `/tmp`
+`CLAUDE_SWARM_RUNTIME_DIR` overrides it. Project identity is keyed by
+the checkout, not just its basename: the runtime records its owning
+root in a `repo-root` marker, and a second checkout with the same
+basename resolves to a content-hashed `<project>-<hash>` identity
+instead of sharing state. The image build pins the container's `agent`
+uid/gid to the host (`AGENT_UID`/`AGENT_GID` build args from
+`id -u`/`id -g`) so the owner-only bind-mounted runtime stays writable
+on native Linux; Docker Desktop remaps ownership, so the 1000 default
+is harmless there. Existing top-level `/tmp`
 state is migrated only after same-owner, non-symlink, unlocked,
 collision-free validation.
 
