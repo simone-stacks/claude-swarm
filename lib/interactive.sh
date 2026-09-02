@@ -211,6 +211,20 @@ if [ -n "$changed_subs" ]; then
     done
 fi
 HOOK
+    # Mirror of the harness.sh pre-commit addition: when the
+    # context mode strips .claude/ from the worktree, unstage
+    # staged .claude/ changes (in practice deletions of the
+    # stripped files) so the harness-side strip can never be
+    # recorded in a commit.  With context=full, .claude/ is
+    # present and may be legitimately edited, so leave it alone.
+    if [ "$SWARM_CONTEXT" != "full" ]; then
+        cat >> .git/hooks/pre-commit <<'HOOK'
+
+# Context mode strips .claude/ from the worktree; never record
+# the harness-side deletions in a commit.
+git reset -q HEAD -- .claude/ 2>/dev/null || true
+HOOK
+    fi
     chmod +x .git/hooks/pre-commit
 
     ilog "setup complete"

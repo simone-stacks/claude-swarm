@@ -28,7 +28,14 @@
 - **Fail-closed auth and container metadata.** Validation delegates to each
   driver, Kimi accepts `KIMI_MODEL_API_KEY`, and labeled agent exits are
   machine-readable for supervisors.
-
+- **Fix: keep the context strip out of agent commits.** With
+  `context: slim` or `none` the harness deletes `.claude/` from
+  the agent's worktree, but a broad `git add -A && git commit`
+  staged the deletion of every stripped file and published it to
+  the shared branch. The pre-commit hook (in both `harness.sh`
+  and `interactive.sh`) now also unstages staged `.claude/`
+  changes whenever the context mode is not `full`; with `full`,
+  `.claude/` edits still commit normally.
 - **Qwen Code CLI driver.** New `qwen-cli` driver
   (`lib/drivers/qwen-cli.sh`) implements the full interface for
   Alibaba's Qwen Code CLI: headless mode with

@@ -653,6 +653,20 @@ if [ -n "$changed_subs" ]; then
     done
 fi
 HOOK
+    # When the context mode strips .claude/ from the worktree,
+    # staged changes under it can only be deletions of the
+    # stripped files -- unstage them so a broad `git add -A`
+    # cannot record the harness-side strip in an agent commit.
+    # With context=full, .claude/ is present and agents may
+    # legitimately edit it, so leave it alone.
+    if [ "$SWARM_CONTEXT" != "full" ]; then
+        cat >> .git/hooks/pre-commit <<'HOOK'
+
+# Context mode strips .claude/ from the worktree; never record
+# the harness-side deletions in a commit.
+git reset -q HEAD -- .claude/ 2>/dev/null || true
+HOOK
+    fi
     chmod +x .git/hooks/pre-commit
 
     mkdir -p agent_logs
