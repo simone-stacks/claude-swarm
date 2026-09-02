@@ -1633,6 +1633,118 @@ assert_eq "harness logs the parked ref name" \
 
 # ============================================================
 echo ""
+echo "=== 19. pre-commit hook keeps the context strip out of commits ==="
+
+# Regression for the real incident where an agent running with
+# context=none had .claude/ stripped from its worktree by the
+# harness, then ran `git add -A && git commit` and the commit
+# recorded the deletion of every .claude/ file, publishing the
+# harness-side strip to the shared branch.  The pre-commit hook
+# must unstage staged .claude/ changes whenever the context mode
+# is not "full".
+
+# Structural pins: both entrypoints must carry the unstage line
+# (interactive.sh installs its own pre-commit hook).
+assert_eq "harness pre-commit unstages .claude/ when stripped" \
+    "1" \
+    "$(grep -cF 'git reset -q HEAD -- .claude/ 2>/dev/null' \
+        "$HARNESS_FILE")"
+assert_eq "interactive pre-commit unstages .claude/ when stripped" \
+    "1" \
+    "$(grep -cF 'git reset -q HEAD -- .claude/ 2>/dev/null' \
+        "$TESTS_DIR/../lib/interactive.sh")"
+
+# Behavioral: install the pre-commit hook as the harness writes
+# it for context=none (base hook plus the appended .claude
+# unstage), strip .claude/, then `git add -A && git commit`.
+PC_NONE="$TMPDIR/pc-none"
+git clone -q "$CTX_BARE" "$PC_NONE"
+git -C "$PC_NONE" config user.name "test"
+git -C "$PC_NONE" config user.email "test@test"
+git -C "$PC_NONE" config commit.gpgsign false
+git -C "$PC_NONE" checkout -q agent-work
+
+cat > "$PC_NONE/.git/hooks/pre-commit" <<'HOOK'
+#!/bin/bash
+git reset -q HEAD -- agent_logs/ .claude/settings.local.json 2>/dev/null || true
+
+# Context mode strips .claude/ from the worktree; never record
+# the harness-side deletions in a commit.
+git reset -q HEAD -- .claude/ 2>/dev/null || true
+HOOK
+chmod +x "$PC_NONE/.git/hooks/pre-commit"
+
+# Harness-side strip (context=none), a real change, then the
+# broad add + commit that previously published the strip.
+rm -rf "$PC_NONE/.claude"
+echo "work" > "$PC_NONE/work.txt"
+git -C "$PC_NONE" add -A
+git -C "$PC_NONE" commit -q -m "agent work"
+
+# The committed tree still contains every .claude/ file...
+assert_eq "none: .claude/ survives in HEAD tree" "3" \
+    "$(git -C "$PC_NONE" ls-tree -r HEAD -- .claude | wc -l | tr -d ' ')"
+# ...and the commit records no .claude/ changes at all.
+assert_eq "none: commit records no .claude/ deletions" "0" \
+    "$(git -C "$PC_NONE" show --name-status --format= HEAD -- .claude \
+        | grep -c . || true)"
+# The hook must not swallow the agent's real change.
+assert_eq "none: real change still committed" "1" \
+    "$(git -C "$PC_NONE" ls-tree HEAD -- work.txt | wc -l | tr -d ' ')"
+
+# Slim variant: only .claude/CLAUDE.md survives the strip; the
+# commit must still record no .claude/ changes at all.
+PC_SLIM="$TMPDIR/pc-slim"
+git clone -q "$CTX_BARE" "$PC_SLIM"
+git -C "$PC_SLIM" config user.name "test"
+git -C "$PC_SLIM" config user.email "test@test"
+git -C "$PC_SLIM" config commit.gpgsign false
+git -C "$PC_SLIM" checkout -q agent-work
+cp "$PC_NONE/.git/hooks/pre-commit" "$PC_SLIM/.git/hooks/pre-commit"
+
+# Harness-side strip (context=slim: keep only CLAUDE.md).
+(cd "$PC_SLIM" && find .claude -mindepth 1 -maxdepth 1 \
+    ! -name CLAUDE.md -exec rm -rf {} +)
+echo "work" > "$PC_SLIM/work.txt"
+git -C "$PC_SLIM" add -A
+git -C "$PC_SLIM" commit -q -m "agent work (slim)"
+
+assert_eq "slim: commit records no .claude/ changes" "0" \
+    "$(git -C "$PC_SLIM" show --name-status --format= HEAD -- .claude \
+        | grep -c . || true)"
+assert_eq "slim: CLAUDE.md still in HEAD tree" "1" \
+    "$(git -C "$PC_SLIM" ls-tree HEAD -- .claude/CLAUDE.md \
+        | wc -l | tr -d ' ')"
+assert_eq "slim: real change still committed" "1" \
+    "$(git -C "$PC_SLIM" ls-tree HEAD -- work.txt | wc -l | tr -d ' ')"
+
+# Full-mode guard: the unstage line is only written when the
+# context mode is not "full", so .claude/ edits made by a
+# full-context agent still commit normally.
+PC_FULL="$TMPDIR/pc-full"
+git clone -q "$CTX_BARE" "$PC_FULL"
+git -C "$PC_FULL" config user.name "test"
+git -C "$PC_FULL" config user.email "test@test"
+git -C "$PC_FULL" config commit.gpgsign false
+git -C "$PC_FULL" checkout -q agent-work
+
+# Hook as written for context=full: no .claude/ unstage line.
+cat > "$PC_FULL/.git/hooks/pre-commit" <<'HOOK'
+#!/bin/bash
+git reset -q HEAD -- agent_logs/ .claude/settings.local.json 2>/dev/null || true
+HOOK
+chmod +x "$PC_FULL/.git/hooks/pre-commit"
+
+echo "edit" >> "$PC_FULL/.claude/CLAUDE.md"
+git -C "$PC_FULL" add -A
+git -C "$PC_FULL" commit -q -m "agent edits context"
+
+assert_eq "full: .claude/ edits still commit" "1" \
+    "$(git -C "$PC_FULL" show --name-status --format= HEAD -- .claude \
+        | grep -c . || true)"
+
+# ============================================================
+echo ""
 echo "==============================="
 echo "  ${PASS} passed, ${FAIL} failed"
 echo "==============================="

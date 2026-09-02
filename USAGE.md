@@ -540,6 +540,12 @@ while other agents use skills and rules for structured output.
 Non-default modes appear in the dashboard Ctx column and in
 commit trailers (`> Ctx: bare`, `> Ctx: slim`).
 
+The strip is invisible to git: when the mode is not `full`, the
+pre-commit hook the harness installs also unstages any staged
+`.claude/` changes, so a broad `git add -A && git commit` never
+records the removal of stripped files. With `full`, `.claude/`
+edits commit normally.
+
 ## Per-group prompts
 
 Each agent group can run a different prompt file:
@@ -754,7 +760,8 @@ Dashboard columns:
   `token` (Bearer / OpenRouter-style),
   `auto` (multiple credentials present, CLI decides).
 - **Ctx** — context mode: `bare` (no `.claude/`), `slim`
-  (only `CLAUDE.md`), or blank for full context.
+  (only `CLAUDE.md`), or blank for full context. The strip is
+  worktree-only; agent commits never record it.
 - **Cost** — cumulative API cost in USD.
 - **In/Out** — input and output tokens.
 - **Cache** — prompt cache read tokens. Higher means the API
